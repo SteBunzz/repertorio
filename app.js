@@ -183,7 +183,7 @@ function renderMono(parts, st, mode){
     else out.push([t, l]);
   }
   const html = out.map(([t, l]) => {
-    if (t === "chord") return l.replace(/\S+/g, x => CHORD_RE.test(x) ? `<span class="ch">${esc(x)}</span>` : esc(x));
+    if (t === "chord") return l.replace(/\S+/g, x => CHORD_RE.test(x) ? `<span class="ch" data-a="chord" data-c="${esc(x.replace(/[()*]/g, ""))}" role="button" tabindex="0">${esc(x)}</span>` : esc(x));
     if (t === "sec") return `<span class="sec">${esc(l)}</span>`;
     return esc(l);
   }).join("\n");
@@ -214,6 +214,145 @@ function partBody(s){
 function renderSheet(text, st){ const p = songParts({ content: text }); return { html: renderMono(p, st, "both").html, hasChords: p.items.some(x => x[0] === "chord") }; }
 function cleanContent(t){ return String(t || "").replace(/\r\n?/g, "\n").replace(/\[\/?(ch|tab)\]/g, ""); }
 function songHasChords(s){ return cleanContent(s.content).split("\n").some(isChordLine); }
+
+
+/* ---------- diagrammi accordi ---------- */
+// Corde dalla 6ª (Mi basso) alla 1ª (Mi cantino). -1 = non suonare, 0 = a vuoto.
+const OPEN_SHAPES = {
+  "C": [-1,3,2,0,1,0], "C7": [-1,3,2,3,1,0], "Cmaj7": [-1,3,2,0,0,0], "Cadd9": [-1,3,2,0,3,0], "C/G": [3,3,2,0,1,0], "C/E": [0,3,2,0,1,0], "C/B": [-1,2,2,0,1,0],
+  "D": [-1,-1,0,2,3,2], "Dm": [-1,-1,0,2,3,1], "D7": [-1,-1,0,2,1,2], "Dm7": [-1,-1,0,2,1,1], "Dmaj7": [-1,-1,0,2,2,2], "Dsus2": [-1,-1,0,2,3,0], "Dsus4": [-1,-1,0,2,3,3], "D/F#": [2,0,0,2,3,2], "D/A": [-1,0,0,2,3,2], "D6": [-1,-1,0,2,0,2], "Dadd9": [-1,-1,0,2,3,0],
+  "E": [0,2,2,1,0,0], "Em": [0,2,2,0,0,0], "E7": [0,2,0,1,0,0], "Em7": [0,2,0,0,0,0], "Esus4": [0,2,2,2,0,0], "Emaj7": [0,2,1,1,0,0], "E5": [0,2,2,-1,-1,-1], "Em/D": [-1,-1,0,0,0,0], "Eadd9": [0,2,4,1,0,0],
+  "F": [1,3,3,2,1,1], "Fmaj7": [-1,-1,3,2,1,0], "F/C": [-1,3,3,2,1,1], "Fadd9": [-1,-1,3,2,1,3],
+  "G": [3,2,0,0,0,3], "G7": [3,2,0,0,0,1], "Gmaj7": [3,2,0,0,0,2], "G6": [3,2,0,0,0,0], "G/B": [-1,2,0,0,0,3], "G/D": [-1,-1,0,0,0,3], "Gsus4": [3,-1,0,0,1,3], "Gadd9": [3,0,0,2,0,3],
+  "A": [-1,0,2,2,2,0], "Am": [-1,0,2,2,1,0], "A7": [-1,0,2,0,2,0], "Am7": [-1,0,2,0,1,0], "Amaj7": [-1,0,2,1,2,0], "Asus2": [-1,0,2,2,0,0], "Asus4": [-1,0,2,2,3,0], "A6": [-1,0,2,2,2,2], "Am/G": [3,0,2,2,1,0], "A7sus4": [-1,0,2,0,3,0], "Am6": [-1,0,2,2,1,2], "Aadd9": [-1,0,2,4,2,0],
+  "B7": [-1,2,1,2,0,2], "Bm7": [-1,2,0,2,0,2]
+};
+// Forme mobili (barré): r = tasto della tonica sulla 6ª (E) o sulla 5ª (A) corda
+const E_SHAPES = {
+  "": [0,2,2,1,0,0], "m": [0,2,2,0,0,0], "7": [0,2,0,1,0,0], "m7": [0,2,0,0,0,0], "maj7": [0,-9,1,1,0,-9],
+  "sus4": [0,2,2,2,0,0], "7sus4": [0,2,0,2,0,0], "5": [0,2,2,-9,-9,-9], "aug": [0,3,2,1,1,0], "add9": [0,2,4,1,0,0],
+  "m7b5": [0,-9,0,0,-1,-9], "dim7": [0,-9,-1,0,-1,-9]
+};
+const A_SHAPES = {
+  "": [-9,0,2,2,2,0], "m": [-9,0,2,2,1,0], "7": [-9,0,2,0,2,0], "m7": [-9,0,2,0,1,0], "maj7": [-9,0,2,1,2,0],
+  "sus2": [-9,0,2,2,0,0], "sus4": [-9,0,2,2,3,0], "7sus4": [-9,0,2,0,3,0], "6": [-9,0,2,2,2,2], "m6": [-9,0,2,2,1,2],
+  "9": [-9,0,-1,0,0,0], "add9": [-9,0,2,4,2,0], "dim": [-9,0,1,2,1,-9], "dim7": [-9,0,1,2,1,2], "m7b5": [-9,0,1,0,1,-9],
+  "aug": [-9,0,3,2,2,1], "5": [-9,0,2,2,-9,-9]
+};
+const QUAL_ALIASES = [
+  [/^(maj|M)?$/, ""], [/^(m|min|-)$/, "m"], [/^7$/, "7"], [/^(m7|min7|-7)$/, "m7"], [/^(maj7|M7|Δ7?|7M|ma7)$/, "maj7"],
+  [/^sus2$/, "sus2"], [/^sus4?$/, "sus4"], [/^7sus4?$/, "7sus4"], [/^(dim|°|o)$/, "dim"], [/^(dim7|°7|o7)$/, "dim7"],
+  [/^(m7b5|m7-5|ø7?|min7b5)$/, "m7b5"], [/^(aug|\+|\+5|#5)$/, "aug"], [/^6$/, "6"], [/^(m6|min6|-6)$/, "m6"],
+  [/^9$/, "9"], [/^(add9|add2|2)$/, "add9"], [/^5$/, "5"]
+];
+function simplifyQual(q){
+  for (const [re, v] of QUAL_ALIASES) if (re.test(q)) return { q: v, approx: false };
+  // estensioni non presenti: usa la forma base più vicina
+  if (/^(maj|M)(9|11|13)/.test(q)) return { q: "maj7", approx: true };
+  if (/^(m|min|-)/.test(q) && !/^maj/.test(q)) return { q: /7|9|11|13/.test(q) ? "m7" : "m", approx: true };
+  if (/7|9|11|13/.test(q)) return { q: "7", approx: true };
+  if (/sus/.test(q)) return { q: "sus4", approx: true };
+  return { q: "", approx: true };
+}
+function parseChord(name){
+  const m = String(name).replace(/[()*]/g, "").match(/^([A-G])([#b]?)(.*?)(?:\/([A-G][#b]?))?$/);
+  if (!m) return null;
+  const root = m[1] + m[2];
+  const { q, approx } = simplifyQual(m[3]);
+  return { root, q, approx, bass: m[4] || "", raw: m[3] };
+}
+// nome con le note in diesis, per cercare le forme aperte
+function sharpName(n){ const i = noteIdx(n); return i < 0 ? n : SHARP[i]; }
+function flatName(n){ const i = noteIdx(n); return i < 0 ? n : FLAT[i]; }
+function chordShapes(name){
+  const c = parseChord(name); if (!c) return null;
+  const out = [];
+  const add = (frets, label, slash = false) => { if (!out.some(o => o.frets.join() === frets.join())) out.push({ frets, label, slash }); };
+  const ri = noteIdx(c.root);
+  for (const r of [c.root, sharpName(c.root), flatName(c.root)]){
+    if (c.bass){ for (const b of [c.bass, sharpName(c.bass), flatName(c.bass)]){ const k = r + c.q + "/" + b; if (OPEN_SHAPES[k]) add(OPEN_SHAPES[k], "Aperto", true); } }
+    if (OPEN_SHAPES[r + c.q]) add(OPEN_SHAPES[r + c.q], "Aperto");
+  }
+  const mobile = (tpl, base, label) => {
+    if (!tpl) return;
+    for (const r of [base, base + 12]){
+      const f = tpl.map(v => v === -9 ? -1 : v + r);
+      if (f.some(v => v < -1) || f.some((v, i) => tpl[i] !== -9 && v < 0)) continue;
+      if (Math.max(...f) > 15) continue;
+      add(f, label); break;
+    }
+  };
+  const r6 = ((ri - 4) % 12 + 12) % 12, r5 = ((ri - 9) % 12 + 12) % 12;
+  const shapes = [[E_SHAPES[c.q], r6, "Barré sulla 6ª corda"], [A_SHAPES[c.q], r5, "Barré sulla 5ª corda"]].sort((a, b) => a[1] - b[1]);
+  for (const [tpl, r, label] of shapes) mobile(tpl, r, label);
+  return { chord: c, shapes: out };
+}
+function chordSVG(frets){
+  const played = frets.filter(f => f > 0);
+  const maxF = played.length ? Math.max(...played) : 0, minF = played.length ? Math.min(...played) : 0;
+  const base = maxF <= 5 ? 1 : minF;
+  const X = i => 22 + i * 17, Y = f => 34 + (f - base + 0.5) * 22;
+  let s = `<svg viewBox="0 0 130 158" width="130" height="158" role="img" aria-label="Diagramma accordo">`;
+  // tasti e corde
+  for (let k = 0; k <= 5; k++) s += `<line x1="${X(0)}" x2="${X(5)}" y1="${34 + k * 22}" y2="${34 + k * 22}" stroke="#6b5a49" stroke-width="${k === 0 && base === 1 ? 5 : 1.2}"/>`;
+  for (let i = 0; i < 6; i++) s += `<line x1="${X(i)}" x2="${X(i)}" y1="34" y2="144" stroke="#a8998a" stroke-width="${1 + (5 - i) * 0.25}"/>`;
+  if (base > 1) s += `<text x="${X(0) - 8}" y="${Y(base) + 4}" text-anchor="end" font-size="11" font-family="JetBrains Mono,monospace" fill="#f1e7da">${base}</text>`;
+  // barré: stesso tasto minimo dalla prima corda suonata con quel tasto fino al cantino
+  const firstMin = frets.findIndex(f => f === minF);
+  const last = 5 - [...frets].reverse().findIndex(f => f === minF);
+  if (minF > 0 && firstMin >= 0 && last - firstMin >= 2 && frets.slice(firstMin, last + 1).every(f => f >= minF)){
+    s += `<rect x="${X(firstMin) - 7}" y="${Y(minF) - 7}" width="${X(last) - X(firstMin) + 14}" height="14" rx="7" fill="#f0a43c"/>`;
+  }
+  frets.forEach((f, i) => {
+    if (f === -1) s += `<text x="${X(i)}" y="25" text-anchor="middle" font-size="12" font-weight="700" fill="#e8735f">✕</text>`;
+    else if (f === 0) s += `<circle cx="${X(i)}" cy="21" r="4.5" fill="none" stroke="#6cc3b5" stroke-width="1.8"/>`;
+    else s += `<circle cx="${X(i)}" cy="${Y(f)}" r="7" fill="#f0a43c"/>`;
+  });
+  const names = ["E","A","D","G","B","e"];
+  names.forEach((n, i) => { s += `<text x="${X(i)}" y="156" text-anchor="middle" font-size="9" font-family="JetBrains Mono,monospace" fill="#a8998a">${n}</text>`; });
+  return s + `</svg>`;
+}
+function chordCard(name, idx = 0){
+  const r = chordShapes(name);
+  if (!r || !r.shapes.length) return `<div class="chord-card"><div class="chord-name">${esc(name)}</div><p class="chord-note">Non conosco ancora questo accordo.</p></div>`;
+  const sh = r.shapes[idx % r.shapes.length];
+  const notes = [];
+  if (r.chord.approx) notes.push(`Forma semplificata di ${esc(r.chord.root + r.chord.q)}`);
+  if (r.chord.bass && !sh.slash) notes.push(`Basso: ${esc(r.chord.bass)} sulla corda più grave`);
+  return `<div class="chord-card"><div class="chord-name">${esc(name)}</div>${chordSVG(sh.frets)}
+    <div class="chord-note">${esc(sh.label)}${r.shapes.length > 1 ? ` · ${idx % r.shapes.length + 1}/${r.shapes.length}` : ""}</div>
+    ${notes.map(n => `<div class="chord-note">${n}</div>`).join("")}</div>`;
+}
+function songChords(s){
+  const seen = new Set(), list = [];
+  for (const [t, l] of songParts(s).items){
+    if (t !== "chord") continue;
+    for (const tok of transposeLine(l, S.transpose).split(/\s+/)){
+      const c = tok.replace(/[()*]/g, "");
+      if (c && CHORD_RE.test(c) && !seen.has(c)){ seen.add(c); list.push(c); }
+    }
+  }
+  return list;
+}
+function showChord(name){
+  let idx = 0;
+  const s = songById(S.songId);
+  const capo = s && +s.capo ? `<p class="chord-tip">Con il capotasto al ${+s.capo}° tasto i tasti si contano dal capotasto.</p>` : "";
+  const draw = el => {
+    $("#m-chord", el).innerHTML = chordCard(name, idx);
+    const n = (chordShapes(name)?.shapes || []).length;
+    $("#m-alt", el).style.display = n > 1 ? "" : "none";
+  };
+  modal({ title: "Accordo", body: `<div id="m-chord" style="display:flex;justify-content:center"></div>${capo}`,
+    actions: `<button class="btn" id="m-alt">Altra posizione</button><button class="btn primary" data-close>Chiudi</button>`,
+    onMount: el => { draw(el); $("#m-alt", el).onclick = () => { idx++; draw(el); }; } });
+}
+function showAllChords(){
+  const s = songById(S.songId); if (!s) return;
+  const list = songChords(s);
+  modal({ title: "Accordi del brano", body: list.length ? `<div class="chord-grid">${list.map(c => `<button class="chord-cell" data-chord="${esc(c)}">${chordCard(c)}</button>`).join("")}</div><p class="chord-tip">Tocca un accordo per vedere altre posizioni.</p>` : `<p style="margin:0;color:var(--muted)">Non trovo accordi in questo brano.</p>`,
+    onMount: el => el.querySelectorAll("[data-chord]").forEach(b => b.onclick = () => showChord(b.dataset.chord)) });
+}
 
 /* ---------- data layer (Firebase Firestore, cache offline persistente) ---------- */
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2/";
@@ -535,6 +674,7 @@ function songView(){
     </div>
     ${s.notes ? `<div class="notes"><span class="lbl">Le mie note</span>${esc(s.notes)}</div>` : ""}
     ${pb.list.length > 1 ? `<div class="parts" role="tablist" aria-label="Cosa mostrare">${pb.list.map(k => `<button role="tab" aria-selected="${pb.part === k}" data-a="part" data-v="${k}">${PART_LABEL[k]}</button>`).join("")}</div>` : ""}
+    ${pb.part !== "lyrics" && hasChords ? `<div class="chord-bar"><button class="link-btn" data-a="all-chords">Mostra le posizioni di tutti gli accordi</button><span class="hint">oppure tocca un accordo nel testo</span></div>` : ""}
     <div id="part-body">${pb.html}</div>
     ${s.source ? `<p class="src">Fonte: ${/^https?:\/\//i.test(s.source) ? `<a href="${esc(s.source)}" target="_blank" rel="noopener">${esc(s.source)}</a>` : esc(s.source)}</p>` : ""}
     <div class="song-pad"></div>
@@ -947,6 +1087,8 @@ const A = {
     }
     ta.value = txt; toast("Testo ricavato dagli accordi");
   },
+  "chord": (_, el) => showChord(el.dataset.c),
+  "all-chords": () => showAllChords(),
   "part": (_, el) => { S.part = el.dataset.v; savePrefs(); render(); },
   "img-del": (_, el) => { const i = +el.dataset.idx; const [im] = S.editImages.splice(i, 1); if (im && !im.isNew) S.removedImages.push(im.id); drawEditImages(); },
   "img-left": (_, el) => { const i = +el.dataset.idx; if (i > 0){ const a = S.editImages; [a[i - 1], a[i]] = [a[i], a[i - 1]]; a[i - 1].moved = a[i].moved = true; drawEditImages(); } },
@@ -1062,6 +1204,16 @@ document.addEventListener("paste", e => {
 (() => {
   const st = document.createElement("style");
   st.textContent = `
+.sheet .ch{cursor:pointer;border-radius:4px}
+.sheet .ch:hover{background:rgba(240,164,60,.15)}
+.chord-bar{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-top:12px}
+.chord-card{display:flex;flex-direction:column;align-items:center;gap:4px}
+.chord-name{font-family:var(--display);font-weight:800;font-size:26px;color:var(--amber)}
+.chord-note{font-size:13px;color:var(--muted);text-align:center}
+.chord-tip{margin:8px 0 0;font-size:13px;color:var(--muted);text-align:center}
+.chord-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+.chord-cell{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:8px 4px}
+.chord-cell .chord-name{font-size:18px}
 .form-sec{grid-column:1 / -1;font-size:18px;margin-top:14px;padding-top:16px;border-top:1px solid var(--line);display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 .form-sec span{font-family:var(--body);font-size:13px;font-weight:600;color:var(--muted)}
 .field textarea.lyr{font-size:16px;line-height:1.5;min-height:200px}
