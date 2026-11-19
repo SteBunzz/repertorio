@@ -11,6 +11,7 @@ const S = {
   sort: "title",
   transpose: 0,
   font: prefs.font || 15,
+  part: prefs.part || "both",   // lyrics | chords | both
   speed: prefs.speed || 3,
   scrolling: false,
   mode: "loading",          // config | login | loading | ready | error
@@ -21,7 +22,7 @@ const S = {
 };
 
 function loadPrefs(){ try { return JSON.parse(localStorage.getItem("repertorio-prefs") || "{}"); } catch { return {}; } }
-function savePrefs(){ try { localStorage.setItem("repertorio-prefs", JSON.stringify({ font: S.font, speed: S.speed })); } catch {} }
+function savePrefs(){ try { localStorage.setItem("repertorio-prefs", JSON.stringify({ font: S.font, speed: S.speed, part: S.part })); } catch {} }
 
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -73,19 +74,144 @@ function transposeLine(line, st){
   return out;
 }
 const SECTION_RE = /^\s*(\[[^\]]{1,40}\]|(intro|verse|verso|strofa|chorus|ritornello|rit\.?|bridge|ponte|outro|solo|pre-?chorus|pre-?rit\w*|interlude|coda|riff|finale)\b[^a-z]{0,12}:?)\s*$/i;
-function renderSheet(text, st){
-  const lines = cleanContent(text).split("\n");
-  let hasChords = false;
-  const html = lines.map(line => {
-    if (isChordLine(line)){
-      hasChords = true;
-      return transposeLine(line, st).replace(/\S+/g, t => CHORD_RE.test(t) ? `<span class="ch">${esc(t)}</span>` : esc(t));
-    }
-    if (SECTION_RE.test(line)) return `<span class="sec">${esc(line)}</span>`;
-    return esc(line);
-  }).join("\n");
-  return { html, hasChords };
+const TAB_CHARS = "-0-9hpbrsxtv\\/\\\\~|.()^*=<>\\s";
+const TAB_RE = new RegExp("^\\s*[A-Ga-g]?[#b]?\\s*[|:]?[" + TAB_CHARS + "]*-{2,}[" + TAB_CHARS + "]*$");
+function isTabLine(l){ return l.trim().length > 4 && TAB_RE.test(l); }
+function classify(line){
+  if (!line.trim()) return "blank";
+  if (isChordLine(line)) return "chord";
+  if (isTabLine(line)) return "tab";
+  if (SECTION_RE.test(line)) return "sec";
+  return "lyric";
 }
+function collapseBlanks(items){
+  const out = [];
+  for (const it of items){ if (it[0] === "blank" && (!out.length || out[out.length - 1][0] === "blank")) continue; out.push(it); }
+  while (out.length && out[out.length - 1][0] === "blank") out.pop();
+  return out;
+}
+// Analizza un brano: cosa contiene e qual è il testo (solo parole)
+function songParts(s){
+  const items = cleanContent(s.content).split("\n").map(l => [classify(l), l.replace(/\s+$/, "")]);
+  const hasMusic = items.some(x => x[0] === "chord" || x[0] === "tab");
+  let lyricItems;
+  if (s.lyrics && s.lyrics.trim()) lyricItems = cleanContent(s.lyrics).split("\n").map(l => [!l.trim() ? "blank" : SECTION_RE.test(l) ? "sec" : "lyric", l.trim()]);
+  else lyricItems = items.filter(x => x[0] === "lyric" || x[0] === "sec" || x[0] === "blank").map(x => [x[0], x[1].trim()]);
+  // togli i titoli di sezione senza parole sotto (es. Intro solo strumentale)
+  lyricItems = lyricItems.filter((x, i) => {
+    if (x[0] !== "sec") return true;
+    let j = i + 1; while (j < lyricItems.length && lyricItems[j][0] === "blank") j++;
+    return j < lyricItems.length && lyricItems[j][0] === "lyric";
+  });
+  lyricItems = collapseBlanks(lyricItems);
+  while (lyricItems.length && lyricItems[0][0] === "blank") lyricItems.shift();
+  const hasLyrics = lyricItems.some(x => x[0] === "lyric");
+  return { items, hasMusic, hasLyrics, lyricItems };
+}
+function availableParts(s){
+  const p = songParts(s); const imgs = (S.images[s.id] || []).length > 0;
+  const list = [];
+  if (p.hasLyrics) list.push("lyrics");
+  if (p.hasMusic || imgs) list.push("chords");
+  if (p.hasLyrics && (p.hasMusic || imgs)) list.push("both");
+  if (!list.length) list.push("both");
+  return { list, parts: p, imgs };
+}
+const PART_LABEL = { lyrics: "Testo", chords: "Accordi", both: "Testo + accordi" };
+
+// larghezza utile del foglio in pixel e misura di un carattere monospazio (~0.6 em)
+function sheetWidth(){ const w = Math.min(window.innerWidth || 400, 860); return Math.max(200, w - 32 - 34); }
+const CH_EM = 0.602;
+function wrapWords(line, cols){
+  const out = [];
+  while (line.length > cols){
+    let b = line.lastIndexOf(" ", cols);
+    if (b < cols * 0.4) b = cols;
+    out.push(line.slice(0, b).replace(/\s+$/, ""));
+    line = line.slice(b).replace(/^ /, "");
+  }
+  out.push(line);
+  return out;
+}
+function wrapPair(c, l, cols){
+  const out = [];
+  while (Math.max(c.length, l.length) > cols){
+    let b = l.lastIndexOf(" ", cols);
+    if (b < cols * 0.4) b = cols;
+    // non spezzare un accordo a metà
+    while (b > 0 && c[b] && c[b] !== " " && c[b - 1] && c[b - 1] !== " ") b--;
+    if (b <= 0) b = cols;
+    out.push(["chord", c.slice(0, b).replace(/\s+$/, "")], ["lyric", l.slice(0, b).replace(/\s+$/, "")]);
+    c = c.slice(b); l = l.slice(b);
+    if (l[0] === " "){ l = l.slice(1); if (c[0] === " ") c = c.slice(1); }
+  }
+  out.push(["chord", c], ["lyric", l]);
+  return out;
+}
+function wrapTab(block, cols){
+  const max = Math.max(...block.map(x => x.length));
+  if (max <= cols) return block.map(x => ["tab", x]);
+  const out = [];
+  for (let i = 0; i < max; i += cols){
+    if (i) out.push(["blank", ""]);
+    for (const x of block) out.push(["tab", x.slice(i, i + cols)]);
+  }
+  return out;
+}
+// Restituisce {html, font} per la vista "chords" o "both", adattata alla larghezza
+function renderMono(parts, st, mode){
+  let items = parts.items.map(([t, l]) => [t, t === "chord" ? transposeLine(l, st) : l]);
+  if (mode === "chords"){
+    items = items.filter(x => x[0] !== "lyric").map(([t, l]) => [t, t === "chord" ? l.replace(/^\s+/, "").replace(/ {4,}/g, "    ") : l]);
+    items = collapseBlanks(items);
+  }
+  const avail = sheetWidth();
+  const maxLen = Math.max(1, ...items.map(x => x[1].length));
+  const fit = Math.floor(avail / (maxLen * CH_EM) * 2) / 2;
+  const font = Math.max(Math.min(S.font, 11), Math.min(S.font, fit));
+  const cols = Math.max(20, Math.floor(avail / (font * CH_EM)));
+  const out = [];
+  for (let i = 0; i < items.length; i++){
+    const [t, l] = items[i];
+    if (t === "tab"){
+      const block = [];
+      while (i < items.length && items[i][0] === "tab"){ block.push(items[i][1]); i++; }
+      i--; out.push(...wrapTab(block, cols)); continue;
+    }
+    if (t === "chord" && items[i + 1] && items[i + 1][0] === "lyric"){ out.push(...wrapPair(l, items[i + 1][1], cols)); i++; continue; }
+    if (l.length > cols) wrapWords(l, cols).forEach(x => out.push([t, x]));
+    else out.push([t, l]);
+  }
+  const html = out.map(([t, l]) => {
+    if (t === "chord") return l.replace(/\S+/g, x => CHORD_RE.test(x) ? `<span class="ch">${esc(x)}</span>` : esc(x));
+    if (t === "sec") return `<span class="sec">${esc(l)}</span>`;
+    return esc(l);
+  }).join("\n");
+  return { html, font };
+}
+function renderLyrics(parts){
+  return parts.lyricItems.map(([t, l]) => t === "blank" ? `<div class="ly-gap"></div>` : t === "sec" ? `<div class="ly-sec">${esc(l.replace(/^\[|\]$/g, ""))}</div>` : `<div class="ly-line">${esc(l)}</div>`).join("");
+}
+function partBody(s){
+  const { list, parts } = availableParts(s);
+  const part = list.includes(S.part) ? S.part : list[list.length - 1];
+  const imgs = S.images[s.id] || [];
+  const imgHtml = imgs.length && part !== "lyrics" ? `<div class="song-imgs">${imgs.map((im, i) => `<button class="song-img" data-a="view-img" data-idx="${i}" aria-label="Apri immagine ${i + 1} a schermo intero"><img src="${im.data}" alt="Immagine ${i + 1} di ${esc(s.title)}" loading="lazy"></button>`).join("")}</div>` : "";
+  if (part === "lyrics"){
+    return { part, list, html: `<div class="lyrics" style="font-size:${S.font + 4}px">${renderLyrics(parts)}</div>` };
+  }
+  const hasText = parts.items.some(x => x[0] !== "blank");
+  let sheet = "";
+  if (hasText){
+    const r = renderMono(parts, S.transpose, part);
+    if (r.html.trim()) sheet = `<div class="sheet"><pre id="sheet" style="font-size:${r.font}px">${r.html}</pre></div>`;
+  } else if (!imgs.length){
+    sheet = `<div class="sheet"><pre id="sheet"><span style="color:var(--muted)">Nessun contenuto. Tocca Modifica per incollare tab o accordi o aggiungere immagini.</span></pre></div>`;
+  }
+  return { part, list, html: imgHtml + sheet };
+}
+// compatibilità con il resto del codice
+function renderSheet(text, st){ const p = songParts({ content: text }); return { html: renderMono(p, st, "both").html, hasChords: p.items.some(x => x[0] === "chord") }; }
 function cleanContent(t){ return String(t || "").replace(/\r\n?/g, "\n").replace(/\[\/?(ch|tab)\]/g, ""); }
 function songHasChords(s){ return cleanContent(s.content).split("\n").some(isChordLine); }
 
@@ -372,7 +498,8 @@ function songRow(s){
 function songView(){
   const s = songById(S.songId);
   if (!s) return `<main class="wrap"><div class="empty"><h3>Brano non trovato</h3><button class="btn" data-a="nav-library">Torna ai brani</button></div></main>`;
-  const { html, hasChords } = renderSheet(s.content, S.transpose);
+  const pb = partBody(s);
+  const hasChords = pb.part !== "lyrics" && songParts(s).items.some(x => x[0] === "chord");
   const meta = [];
   if (+s.capo) meta.push(`<span class="capo-big">CAPO AL ${+s.capo}° TASTO</span>`);
   if (s.tuning && !/^standard$/i.test(s.tuning)) meta.push(`<span class="pill tun">Accordatura: ${esc(s.tuning)}</span>`);
@@ -407,8 +534,8 @@ function songView(){
       <div class="meta">${meta.join("")}</div>
     </div>
     ${s.notes ? `<div class="notes"><span class="lbl">Le mie note</span>${esc(s.notes)}</div>` : ""}
-    ${imgs.length ? `<div class="song-imgs">${imgs.map((im, i) => `<button class="song-img" data-a="view-img" data-idx="${i}" aria-label="Apri immagine ${i + 1} a schermo intero"><img src="${im.data}" alt="Immagine ${i + 1} di ${esc(s.title)}" loading="lazy"></button>`).join("")}</div>` : ""}
-    ${(s.content && s.content.trim()) || !imgs.length ? `<div class="sheet"><pre id="sheet" style="font-size:${S.font}px">${html || '<span style="color:var(--muted)">Nessun contenuto. Tocca Modifica per incollare tab o accordi o aggiungere immagini.</span>'}</pre></div>` : ""}
+    ${pb.list.length > 1 ? `<div class="parts" role="tablist" aria-label="Cosa mostrare">${pb.list.map(k => `<button role="tab" aria-selected="${pb.part === k}" data-a="part" data-v="${k}">${PART_LABEL[k]}</button>`).join("")}</div>` : ""}
+    <div id="part-body">${pb.html}</div>
     ${s.source ? `<p class="src">Fonte: ${/^https?:\/\//i.test(s.source) ? `<a href="${esc(s.source)}" target="_blank" rel="noopener">${esc(s.source)}</a>` : esc(s.source)}</p>` : ""}
     <div class="song-pad"></div>
   </main>
@@ -444,15 +571,22 @@ function editView(){
       <div class="field w2 half"><label for="e-key">Tonalità</label><input id="e-key" name="key" value="${esc(v.key)}" placeholder="Es. G"></div>
       <div class="field w2 half"><label for="e-bpm">BPM</label><input id="e-bpm" name="bpm" inputmode="numeric" value="${esc(v.bpm)}" placeholder="Es. 92"></div>
       <div class="field full"><label for="e-notes">Le mie note</label><textarea id="e-notes" name="notes" rows="3" placeholder="Es. Intro solo con la chitarra acustica, il ritornello si ripete 2 volte, rallentare sul finale">${esc(v.notes)}</textarea></div>
-      <div class="field full"><label>Immagini</label>
+      <h3 class="form-sec">Testo <span>per chi canta</span></h3>
+      <div class="field full">
+        <textarea id="e-lyrics" name="lyrics" class="lyr" rows="8" aria-label="Testo del brano" placeholder="Incolla qui solo le parole del brano.&#10;&#10;[Strofa 1]&#10;Prima riga del testo…&#10;&#10;[Ritornello]&#10;…">${esc(v.lyrics || "")}</textarea>
+        <div class="row-actions"><button type="button" class="btn" data-a="lyr-from-chords">Ricava dagli accordi</button><span class="hint">Copia le righe di testo dal blocco Accordi e tab qui sotto, senza gli accordi.</span></div></div>
+      <h3 class="form-sec">Accordi e tab <span>per chi suona</span></h3>
+      <div class="field full">
+        <textarea id="e-content" name="content" class="code" spellcheck="false" aria-label="Accordi e tablature" placeholder="Incolla qui tablatura o accordi copiati da internet, anche con il testo sotto.&#10;&#10;[Intro]&#10;G        D/F#     Em&#10;e|-----3-----2-----0-----|&#10;B|---3-----3-----0-------|">${esc(v.content)}</textarea>
+        <span class="hint">Gli spazi vengono mantenuti, così gli accordi restano allineati sopra le parole. Le righe di soli accordi vengono evidenziate e si possono trasporre.</span></div>
+      <h3 class="form-sec">Immagini <span>screenshot di accordi o spartiti</span></h3>
+      <div class="field full">
         <div class="img-drop" id="img-drop">
           <div class="img-grid" id="img-grid"></div>
           <div class="img-actions"><label class="btn" for="img-input">+ Aggiungi immagini</label><input type="file" id="img-input" accept="image/*" multiple hidden></div>
-          <span class="hint">Screenshot di pagine di accordi o spartiti. Sul PC puoi anche incollarle con <b>Ctrl+V</b> o trascinarle qui. Vengono ridotte automaticamente per occupare poco spazio.</span>
+          <span class="hint">Sul PC puoi anche incollarle con <b>Ctrl+V</b> o trascinarle qui. Vengono ridotte automaticamente per occupare poco spazio.</span>
         </div></div>
-      <div class="field full"><label for="e-content">Tab o accordi</label>
-        <textarea id="e-content" name="content" class="code" spellcheck="false" placeholder="Incolla qui tablatura o accordi copiati da internet.&#10;&#10;[Intro]&#10;G        D/F#     Em&#10;e|-----3-----2-----0-----|&#10;B|---3-----3-----0-------|">${esc(v.content)}</textarea>
-        <span class="hint">Gli spazi vengono mantenuti, quindi gli accordi restano allineati sopra il testo. Le righe di soli accordi vengono evidenziate e si possono trasporre.</span></div>
+      <h3 class="form-sec">Altro</h3>
       <div class="field full"><label for="e-source">Link alla fonte</label><input id="e-source" name="source" value="${esc(v.source)}" placeholder="https://…"></div>
       <div class="form-actions">
         ${s ? `<button type="button" class="btn danger" data-a="delete-song" data-id="${esc(s.id)}">Elimina brano</button><span class="spacer"></span>` : ""}
@@ -494,6 +628,7 @@ function setupEditor(){
       bpm: String(fd.get("bpm") || "").trim(),
       notes: String(fd.get("notes") || "").trim(),
       content: cleanContent(fd.get("content")).replace(/\s+$/, ""),
+      lyrics: cleanContent(fd.get("lyrics")).replace(/\s+$/, ""),
       source: String(fd.get("source") || "").trim(),
       createdAt: old ? old.createdAt || now : now,
       updatedAt: now,
@@ -747,7 +882,7 @@ const A = {
     const name = [S.f.genre, S.f.artist].filter(Boolean).join(" · ") || "Selezione";
     promptBox("Nuova playlist", "Nome della playlist", name, "Crea playlist", n => newPlaylist(n, list.map(s => s.id)));
   },
-  "font-dec": () => { S.font = Math.max(10, S.font - 1); savePrefs(); updateSongDisplay(); },
+  "font-dec": () => { S.font = Math.max(8, S.font - 1); savePrefs(); updateSongDisplay(); },
   "font-inc": () => { S.font = Math.min(28, S.font + 1); savePrefs(); updateSongDisplay(); },
   "tr-dec": () => { S.transpose = S.transpose <= -11 ? 0 : S.transpose - 1; updateSongDisplay(); },
   "tr-inc": () => { S.transpose = S.transpose >= 11 ? 0 : S.transpose + 1; updateSongDisplay(); },
@@ -801,6 +936,18 @@ const A = {
   "login": () => login(),
   "logout": () => FB.au.signOut(FB.auth),
   "view-img": (_, el) => viewImage(+el.dataset.idx),
+  "lyr-from-chords": () => {
+    const ta = $("#e-lyrics"), src = $("#e-content");
+    const p = songParts({ content: src.value, lyrics: "" });
+    const txt = p.lyricItems.map(([t, l]) => t === "blank" ? "" : l).join("\n");
+    if (!txt.trim()){ toast("Non trovo righe di testo negli accordi"); return; }
+    if (ta.value.trim() && ta.value.trim() !== txt.trim()){
+      confirmBox("Sostituire il testo?", "Il testo che hai scritto verrà sostituito con quello ricavato dagli accordi.", "Sostituisci", () => { ta.value = txt; toast("Testo ricavato dagli accordi"); });
+      return;
+    }
+    ta.value = txt; toast("Testo ricavato dagli accordi");
+  },
+  "part": (_, el) => { S.part = el.dataset.v; savePrefs(); render(); },
   "img-del": (_, el) => { const i = +el.dataset.idx; const [im] = S.editImages.splice(i, 1); if (im && !im.isNew) S.removedImages.push(im.id); drawEditImages(); },
   "img-left": (_, el) => { const i = +el.dataset.idx; if (i > 0){ const a = S.editImages; [a[i - 1], a[i]] = [a[i], a[i - 1]]; a[i - 1].moved = a[i].moved = true; drawEditImages(); } },
   "img-right": (_, el) => { const i = +el.dataset.idx; const a = S.editImages; if (i < a.length - 1){ [a[i + 1], a[i]] = [a[i], a[i + 1]]; a[i + 1].moved = a[i].moved = true; drawEditImages(); } },
@@ -819,9 +966,8 @@ function movePl(idx, dir){
 }
 function updateSongDisplay(){
   const s = songById(S.songId); if (!s) return;
-  const pre = $("#sheet"); if (!pre) return;
-  pre.style.fontSize = S.font + "px";
-  pre.innerHTML = renderSheet(s.content, S.transpose).html;
+  const body = $("#part-body"); if (!body) return;
+  body.innerHTML = partBody(s).html;
   const fv = document.querySelector('[data-a="font-dec"] + .val'); if (fv) fv.textContent = S.font + "px";
   const tv = document.querySelector('[data-a="tr-reset"]'); if (tv) tv.textContent = (S.transpose > 0 ? "+" : "") + S.transpose + " st";
 }
@@ -916,6 +1062,18 @@ document.addEventListener("paste", e => {
 (() => {
   const st = document.createElement("style");
   st.textContent = `
+.form-sec{grid-column:1 / -1;font-size:18px;margin-top:14px;padding-top:16px;border-top:1px solid var(--line);display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.form-sec span{font-family:var(--body);font-size:13px;font-weight:600;color:var(--muted)}
+.field textarea.lyr{font-size:16px;line-height:1.5;min-height:200px}
+.row-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.parts{display:flex;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:4px;margin-top:14px}
+.parts button{flex:1;border:0;background:none;border-radius:9px;padding:10px 6px;font-weight:700;color:var(--muted);font-size:15px}
+.parts button[aria-selected="true"]{background:var(--amber);color:var(--amber-ink)}
+.lyrics{margin-top:14px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:18px 18px 22px;line-height:1.5;font-weight:500}
+.ly-line{min-height:1em;overflow-wrap:anywhere}
+.ly-gap{height:.9em}
+.ly-sec{color:var(--teal);font-weight:700;font-size:.72em;letter-spacing:.08em;text-transform:uppercase;margin:.6em 0 .2em}
+.ly-sec:first-child{margin-top:0}
 .song-imgs{display:flex;flex-direction:column;gap:10px;margin-top:14px}
 .song-img{display:block;width:100%;padding:0;border:1px solid var(--line);border-radius:var(--r);background:#fff;overflow:hidden;cursor:zoom-in}
 .song-img img{display:block;width:100%;height:auto}
@@ -938,6 +1096,8 @@ document.addEventListener("paste", e => {
 `;
   document.head.appendChild(st);
 })();
+let resizeT = 0;
+window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (S.view === "song") updateSongDisplay(); }, 150); });
 document.addEventListener("input", e => {
   if (e.target.id === "q"){ S.f.q = e.target.value; renderLibraryList(); }
 });
