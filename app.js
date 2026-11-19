@@ -14,7 +14,7 @@ const S = {
   speed: prefs.speed || 3,
   scrolling: false,
   mode: "loading",          // config | login | loading | ready | error
-  pendingSongs: false, pendingPl: false, authError: "",
+  pendingSongs: false, pendingPl: false, authError: "", members: [], bandName: "", legacy: null,
   readOnly: false,
   stale: false,
   loaded: { songs: false, playlists: false }
@@ -94,13 +94,18 @@ const SDK = "https://www.gstatic.com/firebasejs/10.12.2/";
 let FB = null;          // { db, auth, uid, fs, au }
 const CONFIG_OK = firebaseConfig && firebaseConfig.apiKey && !/INCOLLA/i.test(firebaseConfig.apiKey);
 
-function colRef(coll){ return FB.fs.collection(FB.db, "users", FB.uid, coll); }
-function docRef(coll, id){ return FB.fs.doc(FB.db, "users", FB.uid, coll, id); }
+// Repertorio comune della band: brani e playlist sono condivisi tra i membri.
+// Il proprietario (deve coincidere con l'email scritta nelle regole di Firestore) gestisce i membri.
+const OWNER_EMAIL = "rizzi.bunzz.stefano@gmail.com";
+const isOwner = () => FB && FB.email.toLowerCase() === OWNER_EMAIL;
+function colRef(coll){ return FB.fs.collection(FB.db, coll); }
+function docRef(coll, id){ return FB.fs.doc(FB.db, coll, id); }
+const bandRef = () => FB.fs.doc(FB.db, "band", "info");
 
 function handleWriteError(e){
   console.error(e);
   const code = e && e.code;
-  if (code === "permission-denied") toast("Permesso negato: controlla le regole di Firestore (vedi guida)");
+  if (code === "permission-denied"){ if (S.mode === "loading" || S.mode === "ready"){ S.mode = "notmember"; render(); } else toast("Permesso negato"); }
   else if (code === "resource-exhausted") toast("Limite del piano gratuito raggiunto per oggi");
   else toast("Salvataggio non riuscito: " + (code || "errore"));
 }
@@ -136,8 +141,8 @@ async function init(){
     FB = { db, auth, fs, au, uid: null, email: "" };
     au.getRedirectResult(auth).catch(e => { if (e && e.code !== "auth/no-auth-event") S.authError = e.code; });
     au.onAuthStateChanged(auth, user => {
-      if (user){ FB.uid = user.uid; FB.email = user.email || ""; S.mode = "loading"; render(); subscribe(); }
-      else { unsubscribeAll(); FB.uid = null; S.songs = []; S.playlists = []; S.mode = "login"; render(); }
+      if (user){ FB.uid = user.uid; FB.email = user.email || ""; FB.name = user.displayName || (user.email || "").split("@")[0]; S.mode = "loading"; render(); start(); }
+      else { unsubscribeAll(); FB.uid = null; S.songs = []; S.playlists = []; S.members = []; S.legacy = null; S.mode = "login"; render(); }
     });
   } catch (e){
     console.error(e);
@@ -146,9 +151,41 @@ async function init(){
 }
 let unsubs = [];
 function unsubscribeAll(){ unsubs.forEach(u => { try { u(); } catch {} }); unsubs = []; }
+async function start(){
+  // Il proprietario crea la scheda della band al primo accesso
+  if (isOwner()){
+    try {
+      const snap = await FB.fs.getDoc(bandRef());
+      if (!snap.exists()) await FB.fs.setDoc(bandRef(), { name: "La band", members: [OWNER_EMAIL] });
+    } catch (e){ console.warn("band/info", e); }
+    checkLegacy();
+  }
+  subscribe();
+}
+// Brani salvati con la versione precedente (repertorio personale): proponi di spostarli
+async function checkLegacy(){
+  try {
+    const [ss, ps] = await Promise.all([
+      FB.fs.getDocs(FB.fs.collection(FB.db, "users", FB.uid, "songs")),
+      FB.fs.getDocs(FB.fs.collection(FB.db, "users", FB.uid, "playlists"))
+    ]);
+    if (ss.size || ps.size){ S.legacy = { songs: ss.docs.map(d => ({ ...d.data(), id: d.id })), playlists: ps.docs.map(d => ({ ...d.data(), id: d.id })) }; render(); }
+  } catch {}
+}
+async function moveLegacy(){
+  const L = S.legacy; if (!L) return;
+  S.legacy = null;
+  const batch = FB.fs.writeBatch(FB.db);
+  for (const s of L.songs){ batch.set(docRef("songs", s.id), s); batch.delete(FB.fs.doc(FB.db, "users", FB.uid, "songs", s.id)); }
+  for (const p of L.playlists){ batch.set(docRef("playlists", p.id), p); batch.delete(FB.fs.doc(FB.db, "users", FB.uid, "playlists", p.id)); }
+  batch.commit().catch(handleWriteError);
+  toast(`Spostati ${L.songs.length} brani nel repertorio della band`);
+  render();
+}
 function subscribe(){
   unsubscribeAll();
   const opts = { includeMetadataChanges: true };
+  unsubs.push(FB.fs.onSnapshot(bandRef(), d => { const m = d.exists() ? d.data().members : []; S.members = Array.isArray(m) ? m : []; S.bandName = d.exists() ? d.data().name || "" : ""; }, () => {}));
   let gotSongs = false, gotPl = false;
   const ready = () => { if (gotSongs && gotPl && S.mode === "loading"){ S.mode = "ready"; render(); } };
   unsubs.push(FB.fs.onSnapshot(colRef("songs"), opts, snap => {
@@ -202,7 +239,7 @@ function render(fromData){
   const app = $("#app");
   const v = S.view;
   let html = topbar();
-  if (S.mode === "config" || S.mode === "login" || S.mode === "error"){ app.innerHTML = gateView(); return; }
+  if (S.mode === "config" || S.mode === "login" || S.mode === "error" || S.mode === "notmember"){ app.innerHTML = gateView(); return; }
   if (S.mode === "loading") html += `<div class="wrap loading">Caricamento del repertorio…</div>`;
   else if (v === "library") html += libraryView();
   else if (v === "song") html += songView();
@@ -229,10 +266,17 @@ function topbar(){
 }
 
 function banner(){
+  if (S.legacy) return `<div class="banner" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><span style="flex:1;min-width:200px">Hai <b>${S.legacy.songs.length} brani</b> salvati prima, nel tuo repertorio personale. Spostali nel repertorio della band così li vedono tutti.</span><button class="btn primary" data-a="move-legacy">Sposta nella band</button></div>`;
   if (installEvt) return `<div class="banner" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><span style="flex:1;min-width:200px"><b>Installa l'app</b> per aprirla dalla schermata Home e usarla anche offline.</span><button class="btn primary" data-a="install">Installa</button></div>`;
   return "";
 }
 function gateView(){
+  if (S.mode === "notmember") return `<div class="gate"><div class="card">
+    <h1>Non sei ancora nella band</h1>
+    <p>Chiedi a Stefano di aggiungerti tra i membri con questa email:</p>
+    <p><b style="color:var(--text);word-break:break-all">${esc(FB.email)}</b></p>
+    <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap"><button class="btn primary" onclick="location.reload()">Riprova</button><button class="btn" data-a="logout">Usa un altro account</button></div>
+  </div></div>`;
   if (S.mode === "config") return `<div class="gate"><div class="card"><h1>Quasi pronto</h1><p>Manca la configurazione di Firebase. Apri il file <code>firebase-config.js</code> e incolla i dati del tuo progetto, come spiegato nella guida.</p></div></div>`;
   if (S.mode === "error") return `<div class="gate"><div class="card"><h1>Non riesco ad avviare l'app</h1><p>Al primo avvio serve la connessione a internet per scaricare l'app. Controlla la rete e ricarica la pagina.</p><button class="btn primary" onclick="location.reload()">Riprova</button></div></div>`;
   return `<div class="gate"><div class="card">
@@ -260,7 +304,7 @@ function filteredSongs(){
 function libraryView(){
   return `<main class="wrap">
     ${banner()}
-    <div class="lib-head"><h1>I miei brani</h1><span class="count" id="count"></span></div>
+    <div class="lib-head"><h1>Brani della band</h1><span class="count" id="count"></span></div>
     <div class="search"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a8998a" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input id="q" type="search" placeholder="Cerca titolo, artista, note…" value="${esc(S.f.q)}" aria-label="Cerca" autocomplete="off"></div>
     <div class="chips" id="chips" role="group" aria-label="Genere"></div>
@@ -348,6 +392,7 @@ function songView(){
     <div class="song-head">
       <h1>${esc(s.title)}</h1>
       <div class="by">${[s.artist, s.genre].filter(Boolean).map(esc).join(" · ")}</div>
+      ${s.updatedBy ? `<div class="by" style="font-size:13px">Ultima modifica di ${esc(s.updatedBy)}</div>` : ""}
       <div class="meta">${meta.join("")}</div>
     </div>
     ${s.notes ? `<div class="notes"><span class="lbl">Le mie note</span>${esc(s.notes)}</div>` : ""}
@@ -424,7 +469,9 @@ function setupEditor(){
       content: cleanContent(fd.get("content")).replace(/\s+$/, ""),
       source: String(fd.get("source") || "").trim(),
       createdAt: old ? old.createdAt || now : now,
-      updatedAt: now
+      updatedAt: now,
+      createdBy: old ? old.createdBy || "" : FB.name,
+      updatedBy: FB.name
     };
     if (!song.title){ $("#e-title").focus(); return; }
     if (new Blob([JSON.stringify(song)]).size > 250000){ toast("Il testo è troppo lungo: prova a togliere le parti ripetute"); return; }
@@ -635,6 +682,8 @@ const A = {
   "pl-delete": () => { const p = plById(S.playlistId); if (p) confirmBox("Eliminare la playlist?", `"${p.name}" verrà eliminata. I brani restano nel repertorio.`, "Elimina", async () => { if (await remove("playlists", p.id)){ toast("Playlist eliminata"); go("playlists"); } }); },
   "backup": () => backupDialog(),
   "login": () => login(),
+  "logout": () => FB.au.signOut(FB.auth),
+  "move-legacy": () => moveLegacy(),
   "install": async () => { if (!installEvt) return; installEvt.prompt(); try { await installEvt.userChoice; } catch {} installEvt = null; render(); }
 };
 function movePl(idx, dir){
@@ -656,10 +705,37 @@ function updateSongDisplay(){
   const tv = document.querySelector('[data-a="tr-reset"]'); if (tv) tv.textContent = (S.transpose > 0 ? "+" : "") + S.transpose + " st";
 }
 
+function setupMembers(el){
+  const box = $("#m-members", el), input = $("#m-email", el);
+  const draw = () => {
+    box.innerHTML = S.members.map(m => `<div class="check" style="cursor:default"><span style="flex:1;word-break:break-all">${esc(m)}${m === OWNER_EMAIL ? ' <span class="s">(tu)</span>' : ""}</span>${m === OWNER_EMAIL ? "" : `<button class="icon-btn ghost" data-rm="${esc(m)}" aria-label="Togli ${esc(m)}">✕</button>`}</div>`).join("");
+    box.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => saveMembers(S.members.filter(x => x !== b.dataset.rm)).then(draw));
+  };
+  const add = async () => {
+    const e = input.value.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)){ toast("Scrivi un'email valida"); input.focus(); return; }
+    if (S.members.includes(e)){ toast("È già nella band"); return; }
+    await saveMembers([...S.members, e]); input.value = ""; draw();
+    toast("Aggiunto: ora può accedere con " + e);
+  };
+  $("#m-add", el).onclick = add;
+  input.onkeydown = ev => { if (ev.key === "Enter") add(); };
+  draw();
+}
+async function saveMembers(list){
+  const members = [...new Set([OWNER_EMAIL, ...list.map(x => x.toLowerCase())])];
+  S.members = members;
+  FB.fs.setDoc(bandRef(), { name: S.bandName || "La band", members }).catch(handleWriteError);
+}
 function backupDialog(){
   const data = JSON.stringify({ app: "repertorio", version: 1, exportedAt: new Date().toISOString(), songs: S.songs, playlists: S.playlists }, null, 1);
-  modal({ title: "Account e backup",
-    body: `<div class="acct"><span style="flex:1">Accesso come <b>${esc(FB.email)}</b></span><button class="btn" id="m-logout">Esci</button></div>
+  const membersHtml = isOwner() ? `<hr style="border:0;border-top:1px solid var(--line);width:100%;margin:4px 0">
+      <h3 style="font-size:17px">Membri della band</h3>
+      <p style="margin:0;color:var(--muted);font-size:14px">Chi è in questo elenco può vedere, aggiungere e modificare tutti i brani e le playlist. Usa l'email del loro account Google.</p>
+      <div id="m-members" style="display:flex;flex-direction:column;gap:6px"></div>
+      <div style="display:flex;gap:8px"><input type="text" id="m-email" placeholder="email@gmail.com" aria-label="Email del nuovo membro" inputmode="email" autocomplete="off"><button class="btn primary" id="m-add">Aggiungi</button></div>` : "";
+  modal({ title: "Band, account e backup",
+    body: `<div class="acct"><span style="flex:1">Accesso come <b>${esc(FB.email)}</b></span><button class="btn" id="m-logout">Esci</button></div>${membersHtml}
       <hr style="border:0;border-top:1px solid var(--line);width:100%;margin:4px 0">
       <p style="margin:0;color:var(--muted);font-size:14px">Scarica una copia di sicurezza con tutti i ${S.songs.length} brani e le ${S.playlists.length} playlist.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="m-dl">Scarica backup</button><button class="btn" id="m-copy">Copia negli appunti</button></div>
@@ -670,6 +746,7 @@ function backupDialog(){
       <button class="btn primary" id="m-import">Importa</button>`,
     onMount: el => {
       $("#m-logout", el).onclick = async () => { closeModal(); await FB.au.signOut(FB.auth); };
+      if (isOwner()) setupMembers(el);
       $("#m-dl", el).onclick = () => {
         const a = document.createElement("a");
         a.href = URL.createObjectURL(new Blob([data], { type: "application/json" }));
