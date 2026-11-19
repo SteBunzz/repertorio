@@ -14,7 +14,7 @@ const S = {
   speed: prefs.speed || 3,
   scrolling: false,
   mode: "loading",          // config | login | loading | ready | error
-  pendingSongs: false, pendingPl: false, authError: "", members: [], bandName: "", legacy: null,
+  pendingSongs: false, pendingPl: false, authError: "", members: [], bandName: "", legacy: null, images: {}, editImages: [],
   readOnly: false,
   stale: false,
   loaded: { songs: false, playlists: false }
@@ -135,7 +135,7 @@ async function init(){
     ]);
     const fapp = app.initializeApp(firebaseConfig);
     let db;
-    try { db = fs.initializeFirestore(fapp, { localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }) }); }
+    try { db = fs.initializeFirestore(fapp, { localCache: fs.persistentLocalCache({ cacheSizeBytes: fs.CACHE_SIZE_UNLIMITED, tabManager: fs.persistentMultipleTabManager() }) }); }
     catch { db = fs.getFirestore(fapp); }
     const auth = au.getAuth(fapp);
     FB = { db, auth, fs, au, uid: null, email: "" };
@@ -193,6 +193,13 @@ function subscribe(){
     S.pendingSongs = snap.metadata.hasPendingWrites;
     gotSongs = true; ready(); if (S.mode === "ready") render(true);
   }, e => { handleWriteError(e); gotSongs = true; ready(); }));
+  unsubs.push(FB.fs.onSnapshot(colRef("images"), opts, snap => {
+    const map = {};
+    for (const d of snap.docs){ const x = { ...d.data(), id: d.id }; if (!x.songId) continue; (map[x.songId] ||= []).push(x); }
+    for (const k in map) map[k].sort((a, b) => (a.order || 0) - (b.order || 0));
+    S.images = map;
+    if (S.mode === "ready" && S.view !== "edit") render(true);
+  }, () => {}));
   unsubs.push(FB.fs.onSnapshot(colRef("playlists"), opts, snap => {
     S.playlists = snap.docs.map(d => ({ ...d.data(), id: d.id }));
     S.pendingPl = snap.metadata.hasPendingWrites;
@@ -351,7 +358,9 @@ function songBadges(s){
   const b = [];
   if (+s.capo) b.push(`<span class="badge capo">CAPO ${+s.capo}</span>`);
   if (s.tuning && !/^standard$/i.test(s.tuning)) b.push(`<span class="badge tun">${esc(s.tuning)}</span>`);
-  b.push(`<span class="badge">${s.type === "tabs" ? "TAB" : s.type === "both" ? "ACC+TAB" : "ACC"}</span>`);
+  const nImg = (S.images[s.id] || []).length;
+  if (s.content && s.content.trim()) b.push(`<span class="badge">${s.type === "tabs" ? "TAB" : s.type === "both" ? "ACC+TAB" : "ACC"}</span>`);
+  if (nImg) b.push(`<span class="badge">IMG ${nImg}</span>`);
   return b.join("");
 }
 function songRow(s){
@@ -369,7 +378,9 @@ function songView(){
   if (s.tuning && !/^standard$/i.test(s.tuning)) meta.push(`<span class="pill tun">Accordatura: ${esc(s.tuning)}</span>`);
   if (s.key) meta.push(`<span class="pill">Tonalità: ${esc(s.key)}</span>`);
   if (s.bpm) meta.push(`<span class="pill">${esc(s.bpm)} BPM</span>`);
-  meta.push(`<span class="pill">${TYPE_LABEL[s.type] || "Accordi"}</span>`);
+  const imgs = S.images[s.id] || [];
+  if (s.content && s.content.trim()) meta.push(`<span class="pill">${TYPE_LABEL[s.type] || "Accordi"}</span>`);
+  if (imgs.length) meta.push(`<span class="pill">${imgs.length} ${imgs.length === 1 ? "immagine" : "immagini"}</span>`);
   let ctx = "";
   if (S.play){
     const p = plById(S.play.playlistId);
@@ -396,7 +407,8 @@ function songView(){
       <div class="meta">${meta.join("")}</div>
     </div>
     ${s.notes ? `<div class="notes"><span class="lbl">Le mie note</span>${esc(s.notes)}</div>` : ""}
-    <div class="sheet"><pre id="sheet" style="font-size:${S.font}px">${html || '<span style="color:var(--muted)">Nessun contenuto. Tocca Modifica per incollare tab o accordi.</span>'}</pre></div>
+    ${imgs.length ? `<div class="song-imgs">${imgs.map((im, i) => `<button class="song-img" data-a="view-img" data-idx="${i}" aria-label="Apri immagine ${i + 1} a schermo intero"><img src="${im.data}" alt="Immagine ${i + 1} di ${esc(s.title)}" loading="lazy"></button>`).join("")}</div>` : ""}
+    ${(s.content && s.content.trim()) || !imgs.length ? `<div class="sheet"><pre id="sheet" style="font-size:${S.font}px">${html || '<span style="color:var(--muted)">Nessun contenuto. Tocca Modifica per incollare tab o accordi o aggiungere immagini.</span>'}</pre></div>` : ""}
     ${s.source ? `<p class="src">Fonte: ${/^https?:\/\//i.test(s.source) ? `<a href="${esc(s.source)}" target="_blank" rel="noopener">${esc(s.source)}</a>` : esc(s.source)}</p>` : ""}
     <div class="song-pad"></div>
   </main>
@@ -432,6 +444,12 @@ function editView(){
       <div class="field w2 half"><label for="e-key">Tonalità</label><input id="e-key" name="key" value="${esc(v.key)}" placeholder="Es. G"></div>
       <div class="field w2 half"><label for="e-bpm">BPM</label><input id="e-bpm" name="bpm" inputmode="numeric" value="${esc(v.bpm)}" placeholder="Es. 92"></div>
       <div class="field full"><label for="e-notes">Le mie note</label><textarea id="e-notes" name="notes" rows="3" placeholder="Es. Intro solo con la chitarra acustica, il ritornello si ripete 2 volte, rallentare sul finale">${esc(v.notes)}</textarea></div>
+      <div class="field full"><label>Immagini</label>
+        <div class="img-drop" id="img-drop">
+          <div class="img-grid" id="img-grid"></div>
+          <div class="img-actions"><label class="btn" for="img-input">+ Aggiungi immagini</label><input type="file" id="img-input" accept="image/*" multiple hidden></div>
+          <span class="hint">Screenshot di pagine di accordi o spartiti. Sul PC puoi anche incollarle con <b>Ctrl+V</b> o trascinarle qui. Vengono ridotte automaticamente per occupare poco spazio.</span>
+        </div></div>
       <div class="field full"><label for="e-content">Tab o accordi</label>
         <textarea id="e-content" name="content" class="code" spellcheck="false" placeholder="Incolla qui tablatura o accordi copiati da internet.&#10;&#10;[Intro]&#10;G        D/F#     Em&#10;e|-----3-----2-----0-----|&#10;B|---3-----3-----0-------|">${esc(v.content)}</textarea>
         <span class="hint">Gli spazi vengono mantenuti, quindi gli accordi restano allineati sopra il testo. Le righe di soli accordi vengono evidenziate e si possono trasporre.</span></div>
@@ -449,6 +467,15 @@ function editView(){
 }
 function setupEditor(){
   const form = $("#song-form");
+  S.editImages = (S.editId ? (S.images[S.editId] || []) : []).map(x => ({ id: x.id, data: x.data, prevOrder: x.order, isNew: false }));
+  S.removedImages = [];
+  drawEditImages();
+  const input = $("#img-input");
+  input.onchange = () => { addImageFiles([...input.files]); input.value = ""; };
+  const drop = $("#img-drop");
+  drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); addImageFiles([...e.dataTransfer.files]); });
   if (!S.editId) setTimeout(() => $("#e-title")?.focus(), 30);
   form.addEventListener("submit", async e => {
     e.preventDefault();
@@ -474,15 +501,104 @@ function setupEditor(){
       updatedBy: FB.name
     };
     if (!song.title){ $("#e-title").focus(); return; }
+    if (S.imgBusy){ toast("Attendi: sto preparando le immagini"); return; }
     if (new Blob([JSON.stringify(song)]).size > 250000){ toast("Il testo è troppo lungo: prova a togliere le parti ripetute"); return; }
     $("#save-btn").disabled = true;
     const ok = await write("songs", song);
+    if (ok) saveEditImages(song.id);
     if (ok){
       S.songId = song.id; S.view = "song"; S.transpose = 0; S.editId = null;
       toast(old ? "Modifiche salvate" : "Brano aggiunto");
       render(); window.scrollTo(0, 0);
     } else { const b = $("#save-btn"); if (b) b.disabled = false; }
   });
+}
+
+/* ---------- immagini ---------- */
+async function compressImage(file){
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    let max = 1800, q = 0.78, out = "";
+    for (let k = 0; k < 6; k++){
+      const sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(img.naturalWidth * sc)); c.height = Math.max(1, Math.round(img.naturalHeight * sc));
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      out = c.toDataURL("image/jpeg", q);
+      if (out.length < 650000) break;
+      max = Math.round(max * 0.82); q = Math.max(0.5, q - 0.07);
+    }
+    return out;
+  } finally { URL.revokeObjectURL(url); }
+}
+async function addImageFiles(files){
+  const imgs = files.filter(f => f && /^image\//.test(f.type));
+  if (!imgs.length){ if (files.length) toast("Puoi aggiungere solo immagini"); return; }
+  S.imgBusy = true; drawEditImages();
+  try {
+    for (const f of imgs){
+      try { const data = await compressImage(f); S.editImages.push({ id: uid("i"), data, isNew: true }); drawEditImages(); }
+      catch { toast("Non riesco a leggere " + (f.name || "l'immagine")); }
+    }
+  } finally { S.imgBusy = false; drawEditImages(); }
+}
+function drawEditImages(){
+  const g = $("#img-grid"); if (!g) return;
+  const list = S.editImages;
+  g.innerHTML = list.map((im, i) => `<div class="img-thumb"><img src="${im.data}" alt="Immagine ${i + 1}">
+    <div class="img-tools">
+      <button type="button" data-a="img-left" data-idx="${i}" aria-label="Sposta prima" ${i === 0 ? "disabled" : ""}>←</button>
+      <button type="button" data-a="img-right" data-idx="${i}" aria-label="Sposta dopo" ${i === list.length - 1 ? "disabled" : ""}>→</button>
+      <button type="button" data-a="img-del" data-idx="${i}" aria-label="Togli immagine">✕</button>
+    </div></div>`).join("") + (S.imgBusy ? `<div class="img-thumb busy">Preparo…</div>` : "");
+}
+function saveEditImages(songId){
+  for (const id of S.removedImages || []) FB.fs.deleteDoc(docRef("images", id)).catch(handleWriteError);
+  const list = S.editImages.map((im, i) => ({ ...im, order: i }));
+  const map = { ...S.images };
+  map[songId] = list.map(im => ({ id: im.id, songId, data: im.data, order: im.order }));
+  if (!list.length) delete map[songId];
+  S.images = map;
+  for (const im of list){
+    if (im.isNew || im.order !== im.prevOrder) FB.fs.setDoc(docRef("images", im.id), { songId, data: im.data, order: im.order, createdBy: FB.name, createdAt: Date.now() }).catch(handleWriteError);
+  }
+  S.editImages = []; S.removedImages = [];
+}
+function deleteSongImages(songId){
+  for (const im of S.images[songId] || []) FB.fs.deleteDoc(docRef("images", im.id)).catch(handleWriteError);
+  const map = { ...S.images }; delete map[songId]; S.images = map;
+}
+function viewImage(idx){
+  const imgs = S.images[S.songId] || [];
+  let i = idx, zoom = 1;
+  const root = $("#modal-root");
+  const draw = () => {
+    const im = imgs[i]; if (!im) return closeModal();
+    root.innerHTML = `<div class="viewer" role="dialog" aria-modal="true" aria-label="Immagine ${i + 1} di ${imgs.length}">
+      <div class="viewer-bar">
+        <span>${i + 1} / ${imgs.length}</span><span class="spacer"></span>
+        <button class="icon-btn" data-v="out" aria-label="Riduci">−</button>
+        <button class="icon-btn" data-v="in" aria-label="Ingrandisci">+</button>
+        ${imgs.length > 1 ? `<button class="icon-btn" data-v="prev" aria-label="Precedente" ${i === 0 ? "disabled" : ""}>‹</button><button class="icon-btn" data-v="next" aria-label="Successiva" ${i === imgs.length - 1 ? "disabled" : ""}>›</button>` : ""}
+        <button class="icon-btn" data-v="close" aria-label="Chiudi">✕</button>
+      </div>
+      <div class="viewer-body"><img src="${im.data}" alt="Immagine ${i + 1}" style="width:${zoom * 100}%"></div>
+    </div>`;
+    root.querySelector(".viewer-bar").onclick = e => {
+      const b = e.target.closest("[data-v]"); if (!b || b.disabled) return;
+      const v = b.dataset.v;
+      if (v === "close") return closeModal();
+      if (v === "in") zoom = Math.min(4, zoom + 0.5);
+      if (v === "out") zoom = Math.max(1, zoom - 0.5);
+      if (v === "prev") { i--; zoom = 1; }
+      if (v === "next") { i++; zoom = 1; }
+      draw();
+    };
+  };
+  draw();
 }
 
 /* playlists */
@@ -619,6 +735,7 @@ const A = {
     confirmBox("Eliminare il brano?", `"${s.title}" verrà tolto dal repertorio e da tutte le playlist.`, "Elimina", async () => {
       const ok = await remove("songs", id);
       if (!ok) return;
+      deleteSongImages(id);
       for (const p of S.playlists.filter(p => (p.songIds || []).includes(id))) await updatePl(p, { songIds: p.songIds.filter(x => x !== id) });
       toast("Brano eliminato"); go("library", { editId: null, songId: null });
     });
@@ -683,6 +800,10 @@ const A = {
   "backup": () => backupDialog(),
   "login": () => login(),
   "logout": () => FB.au.signOut(FB.auth),
+  "view-img": (_, el) => viewImage(+el.dataset.idx),
+  "img-del": (_, el) => { const i = +el.dataset.idx; const [im] = S.editImages.splice(i, 1); if (im && !im.isNew) S.removedImages.push(im.id); drawEditImages(); },
+  "img-left": (_, el) => { const i = +el.dataset.idx; if (i > 0){ const a = S.editImages; [a[i - 1], a[i]] = [a[i], a[i - 1]]; a[i - 1].moved = a[i].moved = true; drawEditImages(); } },
+  "img-right": (_, el) => { const i = +el.dataset.idx; const a = S.editImages; if (i < a.length - 1){ [a[i + 1], a[i]] = [a[i], a[i + 1]]; a[i + 1].moved = a[i].moved = true; drawEditImages(); } },
   "move-legacy": () => moveLegacy(),
   "install": async () => { if (!installEvt) return; installEvt.prompt(); try { await installEvt.userChoice; } catch {} installEvt = null; render(); }
 };
@@ -728,7 +849,8 @@ async function saveMembers(list){
   FB.fs.setDoc(bandRef(), { name: S.bandName || "La band", members }).catch(handleWriteError);
 }
 function backupDialog(){
-  const data = JSON.stringify({ app: "repertorio", version: 1, exportedAt: new Date().toISOString(), songs: S.songs, playlists: S.playlists }, null, 1);
+  const allImages = Object.values(S.images).flat();
+  const data = JSON.stringify({ app: "repertorio", version: 2, exportedAt: new Date().toISOString(), songs: S.songs, playlists: S.playlists, images: allImages }, null, 1);
   const membersHtml = isOwner() ? `<hr style="border:0;border-top:1px solid var(--line);width:100%;margin:4px 0">
       <h3 style="font-size:17px">Membri della band</h3>
       <p style="margin:0;color:var(--muted);font-size:14px">Chi è in questo elenco può vedere, aggiungere e modificare tutti i brani e le playlist. Usa l'email del loro account Google.</p>
@@ -762,11 +884,12 @@ function backupDialog(){
         const pls = (Array.isArray(d.playlists) ? d.playlists : []).filter(p => p && p.id && p.name);
         if (!songs.length && !pls.length){ toast("Il backup non contiene brani"); return; }
         b.disabled = true;
-        const all = [...songs.map(s => ["songs", { ...s, content: cleanContent(s.content) }]), ...pls.map(p => ["playlists", { ...p, songIds: Array.isArray(p.songIds) ? p.songIds : [] }])];
+        const imgsIn = (Array.isArray(d.images) ? d.images : []).filter(x => x && x.id && x.songId && typeof x.data === "string" && x.data.length < 900000);
+        const all = [...songs.map(s => ["songs", { ...s, content: cleanContent(s.content) }]), ...pls.map(p => ["playlists", { ...p, songIds: Array.isArray(p.songIds) ? p.songIds : [] }]), ...imgsIn.map(x => ["images", x])];
         try {
-          for (let i = 0; i < all.length; i += 400){
+          for (let i = 0; i < all.length; i += 12){
             const batch = FB.fs.writeBatch(FB.db);
-            for (const [c, o] of all.slice(i, i + 400)) batch.set(docRef(c, String(o.id)), JSON.parse(JSON.stringify(o)));
+            for (const [c, o] of all.slice(i, i + 12)) batch.set(docRef(c, String(o.id)), JSON.parse(JSON.stringify(o)));
             batch.commit().catch(handleWriteError);
           }
         } catch (e){ handleWriteError(e); b.disabled = false; return; }
@@ -782,6 +905,39 @@ document.addEventListener("click", e => {
   const fn = A[el.dataset.a];
   if (fn){ e.preventDefault(); fn(el.dataset.id, el, e); }
 });
+document.addEventListener("paste", e => {
+  if (S.view !== "edit" || !e.clipboardData) return;
+  const files = [...e.clipboardData.items].filter(it => it.kind === "file" && /^image\//.test(it.type)).map(it => it.getAsFile()).filter(Boolean);
+  if (!files.length) return;
+  e.preventDefault();
+  addImageFiles(files);
+  toast(files.length === 1 ? "Immagine incollata" : files.length + " immagini incollate");
+});
+(() => {
+  const st = document.createElement("style");
+  st.textContent = `
+.song-imgs{display:flex;flex-direction:column;gap:10px;margin-top:14px}
+.song-img{display:block;width:100%;padding:0;border:1px solid var(--line);border-radius:var(--r);background:#fff;overflow:hidden;cursor:zoom-in}
+.song-img img{display:block;width:100%;height:auto}
+.img-drop{display:flex;flex-direction:column;gap:10px;border:1px dashed var(--line);border-radius:var(--r);padding:12px}
+.img-drop.over{border-color:var(--amber);background:var(--surface)}
+.img-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px}
+.img-grid:empty{display:none}
+.img-thumb{position:relative;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff;aspect-ratio:3/4}
+.img-thumb img{width:100%;height:100%;object-fit:cover;object-position:top}
+.img-thumb.busy{display:flex;align-items:center;justify-content:center;background:var(--surface);color:var(--muted);font-size:14px}
+.img-tools{position:absolute;left:0;right:0;bottom:0;display:flex;justify-content:space-between;background:rgba(23,19,15,.85)}
+.img-tools button{flex:1;border:0;background:none;height:32px;font-weight:700}
+.img-tools button:disabled{opacity:.3}
+.img-actions{display:flex;gap:8px}
+.img-actions label.btn{cursor:pointer}
+.viewer{position:fixed;inset:0;z-index:70;background:#000;display:flex;flex-direction:column}
+.viewer-bar{display:flex;align-items:center;gap:6px;padding:8px 12px calc(8px);padding-top:calc(8px + env(safe-area-inset-top));background:var(--surface);color:var(--muted);font-family:var(--mono);font-size:13px}
+.viewer-body{flex:1;overflow:auto;touch-action:pan-x pan-y pinch-zoom;-webkit-overflow-scrolling:touch}
+.viewer-body img{display:block;margin:0 auto;max-width:none;height:auto;background:#fff}
+`;
+  document.head.appendChild(st);
+})();
 document.addEventListener("input", e => {
   if (e.target.id === "q"){ S.f.q = e.target.value; renderLibraryList(); }
 });
