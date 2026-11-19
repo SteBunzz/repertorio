@@ -1,5 +1,8 @@
 import { firebaseConfig } from "./firebase-config.js";
 
+// Cambia questo numero a ogni aggiornamento: l'app lo usa per avvisare che c'è una versione nuova.
+const APP_VERSION = "2026.11.19-b";
+
 /* ---------- state ---------- */
 const prefs = loadPrefs();
 const S = {
@@ -7,22 +10,23 @@ const S = {
   view: "library", prevView: "library",
   songId: null, editId: null, playlistId: null,
   play: null,               // {playlistId, index}
-  f: { q: "", genre: "", artist: "", type: "" },
+  f: { q: "", genre: "", artist: "", type: "", status: "" },
   sort: "title",
   transpose: 0,
   font: prefs.font || 15,
   part: prefs.part || "both",   // lyrics | chords | both
+  instr: prefs.instr || "guitar", // guitar | uke | bass
   speed: prefs.speed || 3,
   scrolling: false,
   mode: "loading",          // config | login | loading | ready | error
-  pendingSongs: false, pendingPl: false, authError: "", members: [], bandName: "", legacy: null, images: {}, editImages: [],
+  pendingSongs: false, pendingPl: false, authError: "", members: [], viewers: [], bandName: "", legacy: null, images: {}, editImages: [], trash: [], status: {}, myNotes: {}, stage: false, metro: null,
   readOnly: false,
   stale: false,
   loaded: { songs: false, playlists: false }
 };
 
 function loadPrefs(){ try { return JSON.parse(localStorage.getItem("repertorio-prefs") || "{}"); } catch { return {}; } }
-function savePrefs(){ try { localStorage.setItem("repertorio-prefs", JSON.stringify({ font: S.font, speed: S.speed, part: S.part })); } catch {} }
+function savePrefs(){ try { localStorage.setItem("repertorio-prefs", JSON.stringify({ font: S.font, speed: S.speed, part: S.part, instr: S.instr })); } catch {} }
 
 /* ---------- helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -287,19 +291,20 @@ function chordShapes(name){
   for (const [tpl, r, label] of shapes) mobile(tpl, r, label);
   return { chord: c, shapes: out };
 }
-function chordSVG(frets){
+function chordSVG(frets, names = ["E","A","D","G","B","e"]){
   const played = frets.filter(f => f > 0);
   const maxF = played.length ? Math.max(...played) : 0, minF = played.length ? Math.min(...played) : 0;
   const base = maxF <= 5 ? 1 : minF;
-  const X = i => 22 + i * 17, Y = f => 34 + (f - base + 0.5) * 22;
+  const n = frets.length, gap = n === 6 ? 17 : 25, x0 = n === 6 ? 22 : 27;
+  const X = i => x0 + i * gap, Y = f => 34 + (f - base + 0.5) * 22;
   let s = `<svg viewBox="0 0 130 158" width="130" height="158" role="img" aria-label="Diagramma accordo">`;
   // tasti e corde
-  for (let k = 0; k <= 5; k++) s += `<line x1="${X(0)}" x2="${X(5)}" y1="${34 + k * 22}" y2="${34 + k * 22}" stroke="#6b5a49" stroke-width="${k === 0 && base === 1 ? 5 : 1.2}"/>`;
-  for (let i = 0; i < 6; i++) s += `<line x1="${X(i)}" x2="${X(i)}" y1="34" y2="144" stroke="#a8998a" stroke-width="${1 + (5 - i) * 0.25}"/>`;
+  for (let k = 0; k <= 5; k++) s += `<line x1="${X(0)}" x2="${X(n - 1)}" y1="${34 + k * 22}" y2="${34 + k * 22}" stroke="#6b5a49" stroke-width="${k === 0 && base === 1 ? 5 : 1.2}"/>`;
+  for (let i = 0; i < n; i++) s += `<line x1="${X(i)}" x2="${X(i)}" y1="34" y2="144" stroke="#a8998a" stroke-width="${1 + (n - 1 - i) * 0.25}"/>`;
   if (base > 1) s += `<text x="${X(0) - 8}" y="${Y(base) + 4}" text-anchor="end" font-size="11" font-family="JetBrains Mono,monospace" fill="#f1e7da">${base}</text>`;
   // barré: stesso tasto minimo dalla prima corda suonata con quel tasto fino al cantino
   const firstMin = frets.findIndex(f => f === minF);
-  const last = 5 - [...frets].reverse().findIndex(f => f === minF);
+  const last = n - 1 - [...frets].reverse().findIndex(f => f === minF);
   if (minF > 0 && firstMin >= 0 && last - firstMin >= 2 && frets.slice(firstMin, last + 1).every(f => f >= minF)){
     s += `<rect x="${X(firstMin) - 7}" y="${Y(minF) - 7}" width="${X(last) - X(firstMin) + 14}" height="14" rx="7" fill="#f0a43c"/>`;
   }
@@ -308,14 +313,19 @@ function chordSVG(frets){
     else if (f === 0) s += `<circle cx="${X(i)}" cy="21" r="4.5" fill="none" stroke="#6cc3b5" stroke-width="1.8"/>`;
     else s += `<circle cx="${X(i)}" cy="${Y(f)}" r="7" fill="#f0a43c"/>`;
   });
-  const names = ["E","A","D","G","B","e"];
   names.forEach((n, i) => { s += `<text x="${X(i)}" y="156" text-anchor="middle" font-size="9" font-family="JetBrains Mono,monospace" fill="#a8998a">${n}</text>`; });
   return s + `</svg>`;
 }
+function instrShapes(name){
+  if (S.instr === "uke") return { shapes: ukeShapes(name), names: ["G","C","E","A"], chord: parseChord(name) };
+  if (S.instr === "bass") return { shapes: bassShapes(name), names: ["E","A","D","G"], chord: parseChord(name) };
+  const r = chordShapes(name); return r ? { ...r, names: undefined } : null;
+}
 function chordCard(name, idx = 0){
-  const r = chordShapes(name);
+  const r = instrShapes(name);
   if (!r || !r.shapes.length) return `<div class="chord-card"><div class="chord-name">${esc(name)}</div><p class="chord-note">Non conosco ancora questo accordo.</p></div>`;
   const sh = r.shapes[idx % r.shapes.length];
+  if (S.instr !== "guitar") return `<div class="chord-card"><div class="chord-name">${esc(name)}</div>${chordSVG(sh.frets, r.names)}<div class="chord-note">${esc(sh.label)}${r.shapes.length > 1 ? ` · ${idx % r.shapes.length + 1}/${r.shapes.length}` : ""}</div>${S.instr === "bass" && r.chord && r.chord.bass ? `<div class="chord-note">Nota al basso dell'accordo ${esc(name)}</div>` : ""}</div>`;
   const notes = [];
   if (r.chord.approx) notes.push(`Forma semplificata di ${esc(r.chord.root + r.chord.q)}`);
   if (r.chord.bass && !sh.slash) notes.push(`Basso: ${esc(r.chord.bass)} sulla corda più grave`);
@@ -340,18 +350,28 @@ function showChord(name){
   const capo = s && +s.capo ? `<p class="chord-tip">Con il capotasto al ${+s.capo}° tasto i tasti si contano dal capotasto.</p>` : "";
   const draw = el => {
     $("#m-chord", el).innerHTML = chordCard(name, idx);
-    const n = (chordShapes(name)?.shapes || []).length;
+    const n = (instrShapes(name)?.shapes || []).length;
     $("#m-alt", el).style.display = n > 1 ? "" : "none";
   };
-  modal({ title: "Accordo", body: `<div id="m-chord" style="display:flex;justify-content:center"></div>${capo}`,
+  modal({ title: "Accordo", body: `${instrPicker()}<div id="m-chord" style="display:flex;justify-content:center"></div>${capo}`,
     actions: `<button class="btn" id="m-alt">Altra posizione</button><button class="btn primary" data-close>Chiudi</button>`,
-    onMount: el => { draw(el); $("#m-alt", el).onclick = () => { idx++; draw(el); }; } });
+    onMount: el => { draw(el); $("#m-alt", el).onclick = () => { idx++; draw(el); }; bindInstr(el, () => { idx = 0; draw(el); }); } });
 }
 function showAllChords(){
   const s = songById(S.songId); if (!s) return;
   const list = songChords(s);
-  modal({ title: "Accordi del brano", body: list.length ? `<div class="chord-grid">${list.map(c => `<button class="chord-cell" data-chord="${esc(c)}">${chordCard(c)}</button>`).join("")}</div><p class="chord-tip">Tocca un accordo per vedere altre posizioni.</p>` : `<p style="margin:0;color:var(--muted)">Non trovo accordi in questo brano.</p>`,
-    onMount: el => el.querySelectorAll("[data-chord]").forEach(b => b.onclick = () => showChord(b.dataset.chord)) });
+  modal({ title: "Accordi del brano", body: list.length ? `${instrPicker()}<div class="chord-grid">${list.map(c => `<button class="chord-cell" data-chord="${esc(c)}">${chordCard(c)}</button>`).join("")}</div><p class="chord-tip">Tocca un accordo per vedere altre posizioni.</p>` : `<p style="margin:0;color:var(--muted)">Non trovo accordi in questo brano.</p>`,
+    onMount: el => { el.querySelectorAll("[data-chord]").forEach(b => b.onclick = () => showChord(b.dataset.chord)); bindInstr(el, () => showAllChords()); } });
+}
+function instrPicker(){
+  return `<div class="seg-mini instr" role="group" aria-label="Strumento">${[["guitar","Chitarra"],["uke","Ukulele"],["bass","Basso"]].map(([k, l]) => `<button data-instr="${k}" aria-pressed="${S.instr === k}">${l}</button>`).join("")}</div>`;
+}
+function bindInstr(el, redraw){
+  el.querySelectorAll("[data-instr]").forEach(b => b.onclick = () => {
+    S.instr = b.dataset.instr; savePrefs();
+    el.querySelectorAll("[data-instr]").forEach(x => x.setAttribute("aria-pressed", x.dataset.instr === S.instr));
+    redraw();
+  });
 }
 
 /* ---------- data layer (Firebase Firestore, cache offline persistente) ---------- */
@@ -378,14 +398,19 @@ function handleWriteError(e){
 // per questo non aspettiamo la conferma del server.
 function write(coll, obj){
   const clean = JSON.parse(JSON.stringify(obj));
-  const arr = coll === "songs" ? S.songs : S.playlists;
-  const i = arr.findIndex(x => x.id === clean.id);
-  if (i >= 0) arr[i] = clean; else arr.push(clean);
+  if (coll === "songs"){
+    S.songs = S.songs.filter(x => x.id !== clean.id); S.trash = S.trash.filter(x => x.id !== clean.id);
+    (clean.deleted ? S.trash : S.songs).push(clean);
+  } else {
+    const arr = S.playlists;
+    const i = arr.findIndex(x => x.id === clean.id);
+    if (i >= 0) arr[i] = clean; else arr.push(clean);
+  }
   FB.fs.setDoc(docRef(coll, clean.id), clean).catch(handleWriteError);
   return true;
 }
 function remove(coll, id){
-  if (coll === "songs") S.songs = S.songs.filter(x => x.id !== id); else S.playlists = S.playlists.filter(x => x.id !== id);
+  if (coll === "songs"){ S.songs = S.songs.filter(x => x.id !== id); S.trash = S.trash.filter(x => x.id !== id); } else S.playlists = S.playlists.filter(x => x.id !== id);
   FB.fs.deleteDoc(docRef(coll, id)).catch(handleWriteError);
   render();
   return true;
@@ -450,11 +475,28 @@ async function moveLegacy(){
 function subscribe(){
   unsubscribeAll();
   const opts = { includeMetadataChanges: true };
-  unsubs.push(FB.fs.onSnapshot(bandRef(), d => { const m = d.exists() ? d.data().members : []; S.members = Array.isArray(m) ? m : []; S.bandName = d.exists() ? d.data().name || "" : ""; }, () => {}));
+  unsubs.push(FB.fs.onSnapshot(bandRef(), d => {
+    const data = d.exists() ? d.data() : {};
+    S.members = Array.isArray(data.members) ? data.members : [];
+    S.viewers = Array.isArray(data.viewers) ? data.viewers : [];
+    S.bandName = data.name || "";
+    const ro = !isOwner() && S.viewers.includes(FB.email.toLowerCase());
+    if (ro !== S.readOnly){ S.readOnly = ro; if (S.mode === "ready" && S.view !== "edit") render(); }
+  }, () => {}));
+  unsubs.push(FB.fs.onSnapshot(colRef("status"), snap => {
+    const m = {}; for (const d of snap.docs) m[d.id] = d.data(); S.status = m;
+    if (S.mode === "ready" && S.view !== "edit") render(true);
+  }, () => {}));
+  unsubs.push(FB.fs.onSnapshot(FB.fs.collection(FB.db, "users", FB.uid, "notes"), snap => {
+    const m = {}; for (const d of snap.docs) m[d.id] = d.data().text || ""; S.myNotes = m;
+    if (S.mode === "ready" && S.view === "song" && !document.querySelector("#my-note-ta")) render(true);
+  }, () => {}));
   let gotSongs = false, gotPl = false;
   const ready = () => { if (gotSongs && gotPl && S.mode === "loading"){ S.mode = "ready"; render(); } };
   unsubs.push(FB.fs.onSnapshot(colRef("songs"), opts, snap => {
-    S.songs = snap.docs.map(d => ({ ...d.data(), id: d.id }));
+    const all = snap.docs.map(d => ({ ...d.data(), id: d.id }));
+    S.songs = all.filter(x => !x.deleted); S.trash = all.filter(x => x.deleted);
+    if (!snap.metadata.fromCache && !S.purged){ S.purged = true; purgeTrash(); }
     S.pendingSongs = snap.metadata.hasPendingWrites;
     gotSongs = true; ready(); if (S.mode === "ready") render(true);
   }, e => { handleWriteError(e); gotSongs = true; ready(); }));
@@ -471,6 +513,120 @@ function subscribe(){
     gotPl = true; ready(); if (S.mode === "ready") render(true);
   }, e => { handleWriteError(e); gotPl = true; ready(); }));
 }
+/* ---------- cestino ---------- */
+const DAY = 86400000;
+function trashSong(s){
+  write("songs", { ...s, deleted: true, deletedAt: Date.now(), deletedBy: FB.name });
+}
+function restoreSong(s){
+  const c = { ...s }; delete c.deleted; delete c.deletedAt; delete c.deletedBy;
+  write("songs", c);
+}
+async function purgeSong(s){
+  remove("songs", s.id);
+  deleteSongImages(s.id);
+  try {
+    const q = FB.fs.query(colRef("history"), FB.fs.where("songId", "==", s.id));
+    const snap = await FB.fs.getDocs(q);
+    snap.docs.forEach(d => FB.fs.deleteDoc(d.ref).catch(() => {}));
+  } catch {}
+  FB.fs.deleteDoc(docRef("status", s.id)).catch(() => {});
+}
+function purgeTrash(){
+  if (S.readOnly) return;
+  for (const s of S.trash) if (Date.now() - (s.deletedAt || 0) > 30 * DAY) purgeSong(s);
+}
+
+/* ---------- cronologia delle versioni ---------- */
+async function saveHistory(old){
+  if (!old) return;
+  const data = { ...old }; delete data.id;
+  FB.fs.setDoc(docRef("history", uid("h")), { songId: old.id, savedAt: Date.now(), by: old.updatedBy || old.createdBy || "", data }).catch(() => {});
+  // tieni solo le ultime 20 versioni
+  try {
+    const snap = await FB.fs.getDocs(FB.fs.query(colRef("history"), FB.fs.where("songId", "==", old.id)));
+    const docs = snap.docs.sort((a, b) => (b.data().savedAt || 0) - (a.data().savedAt || 0));
+    docs.slice(20).forEach(d => FB.fs.deleteDoc(d.ref).catch(() => {}));
+  } catch {}
+}
+async function showHistory(songId){
+  const s = songById(songId); if (!s) return;
+  modal({ title: "Cronologia", body: `<p style="margin:0;color:var(--muted)">Carico le versioni…</p>` });
+  let docs = [];
+  try {
+    const snap = await FB.fs.getDocs(FB.fs.query(colRef("history"), FB.fs.where("songId", "==", songId)));
+    docs = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => b.savedAt - a.savedAt);
+  } catch { toast("Non riesco a leggere la cronologia"); closeModal(); return; }
+  const fmt = t => new Date(t).toLocaleString("it-IT", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  modal({ title: "Cronologia di " + s.title,
+    body: docs.length ? `<p style="margin:0;color:var(--muted);font-size:14px">Le versioni precedenti del brano, dalla più recente. Ripristinandone una, quella attuale viene salvata qui.</p>` + docs.map((h, i) => `<div class="hist">
+        <div class="hist-head"><span><b>${fmt(h.savedAt)}</b>${h.by ? " · " + esc(h.by) : ""}</span><span class="spacer"></span>
+        <button class="btn" data-h-view="${i}">Vedi</button>${S.readOnly ? "" : `<button class="btn primary" data-h-restore="${i}">Ripristina</button>`}</div>
+        <pre class="hist-pre" id="hp-${i}" hidden>${esc([h.data.notes ? "Note: " + h.data.notes + "\n" : "", h.data.content || h.data.lyrics || "(vuoto)"].join(""))}</pre></div>`).join("")
+      : `<p style="margin:0;color:var(--muted)">Nessuna versione precedente: la cronologia si crea dalla prossima modifica.</p>`,
+    onMount: el => {
+      el.querySelectorAll("[data-h-view]").forEach(b => b.onclick = () => { const pre = $("#hp-" + b.dataset.hView, el); pre.hidden = !pre.hidden; });
+      el.querySelectorAll("[data-h-restore]").forEach(b => b.onclick = () => {
+        const h = docs[+b.dataset.hRestore];
+        const cur = songById(songId); saveHistory(cur);
+        write("songs", { ...h.data, id: songId, updatedAt: Date.now(), updatedBy: FB.name });
+        closeModal(); toast("Versione ripristinata"); render();
+      });
+    } });
+}
+
+/* ---------- stato del brano per ogni membro ---------- */
+const STATUS = { learn: "Da imparare", almost: "Quasi", ready: "Pronto" };
+function myStatus(songId){ const st = S.status[songId]; return st && st[FB.uid] ? st[FB.uid].s : ""; }
+function setStatus(songId, v){
+  const cur = myStatus(songId);
+  const val = cur === v ? null : { s: v, n: FB.name, e: FB.email.toLowerCase(), at: Date.now() };
+  const map = { ...(S.status[songId] || {}) };
+  if (val) map[FB.uid] = val; else delete map[FB.uid];
+  S.status = { ...S.status, [songId]: map };
+  FB.fs.setDoc(docRef("status", songId), { [FB.uid]: val || FB.fs.deleteField() }, { merge: true }).catch(handleWriteError);
+  render();
+}
+function editorEmails(){ return S.members.filter(m => !S.viewers.includes(m)); }
+function readyForAll(songId){
+  const st = Object.values(S.status[songId] || {});
+  const emails = editorEmails();
+  return emails.length > 0 && emails.every(e => st.some(x => x.e === e && x.s === "ready"));
+}
+
+/* ---------- note private ---------- */
+function saveMyNote(songId, text){
+  const t = text.trim();
+  S.myNotes = { ...S.myNotes, [songId]: t };
+  const ref = FB.fs.doc(FB.db, "users", FB.uid, "notes", songId);
+  (t ? FB.fs.setDoc(ref, { text: t, at: Date.now() }) : FB.fs.deleteDoc(ref)).catch(handleWriteError);
+}
+
+/* ---------- aggiornamenti dell'app ---------- */
+let lastUpdateCheck = 0;
+async function checkUpdate(){
+  if (location.protocol === "file:" || Date.now() - lastUpdateCheck < 5 * 60000) return;
+  lastUpdateCheck = Date.now();
+  try {
+    const r = await fetch("./app.js", { cache: "no-store" });
+    const m = (await r.text()).match(/const APP_VERSION = "([^"]+)"/);
+    if (m && m[1] !== APP_VERSION && !$("#upd-bar")){
+      const bar = document.createElement("div");
+      bar.id = "upd-bar"; bar.className = "upd-bar";
+      bar.innerHTML = `<span>È disponibile una nuova versione dell'app</span><button class="btn primary" id="upd-go">Aggiorna</button>`;
+      document.body.appendChild(bar);
+      $("#upd-go").onclick = applyUpdate;
+    }
+  } catch {}
+}
+async function applyUpdate(){
+  try { const keys = await caches.keys(); await Promise.all(keys.map(k => caches.delete(k))); } catch {}
+  try { const reg = await navigator.serviceWorker?.getRegistration(); await reg?.update(); } catch {}
+  location.reload();
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") checkUpdate(); });
+setTimeout(checkUpdate, 4000);
+
 async function login(){
   const { au, auth } = FB;
   const provider = new au.GoogleAuthProvider();
@@ -518,9 +674,12 @@ function render(fromData){
   else if (v === "edit") html += editView();
   else if (v === "playlists") html += playlistsView();
   else if (v === "playlist") html += playlistView();
+  else if (v === "trash") html += trashView();
   app.innerHTML = html;
   if (v === "library") { renderLibraryList(); renderLibraryChrome(); }
   if (v === "edit") setupEditor();
+  document.body.classList.toggle("stage", S.stage && v === "song");
+  if (v === "song" && S.editingNote) setTimeout(() => $("#my-note-ta")?.focus(), 20);
 }
 
 function topbar(){
@@ -537,8 +696,14 @@ function topbar(){
   </div></header>`;
 }
 
+function backupDue(){
+  if (!isOwner() || !S.songs.length) return false;
+  let last = 0; try { last = +localStorage.getItem("repertorio-lastBackup") || 0; } catch {}
+  return Date.now() - last > 30 * DAY;
+}
 function banner(){
   if (S.legacy) return `<div class="banner" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><span style="flex:1;min-width:200px">Hai <b>${S.legacy.songs.length} brani</b> salvati prima, nel tuo repertorio personale. Spostali nel repertorio della band così li vedono tutti.</span><button class="btn primary" data-a="move-legacy">Sposta nella band</button></div>`;
+  if (backupDue()) return `<div class="banner" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><span style="flex:1;min-width:200px"><b>È passato più di un mese dall'ultimo backup.</b> Scarica una copia del repertorio da tenere al sicuro.</span><button class="btn primary" data-a="backup">Fai il backup</button></div>`;
   if (installEvt) return `<div class="banner" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><span style="flex:1;min-width:200px"><b>Installa l'app</b> per aprirla dalla schermata Home e usarla anche offline.</span><button class="btn primary" data-a="install">Installa</button></div>`;
   return "";
 }
@@ -566,7 +731,8 @@ function filteredSongs(){
     (!S.f.genre || s.genre === S.f.genre) &&
     (!S.f.artist || s.artist === S.f.artist) &&
     (!S.f.type || s.type === S.f.type || (S.f.type !== "both" && s.type === "both")) &&
-    (!q || norm(`${s.title} ${s.artist} ${s.genre} ${s.notes}`).includes(q))
+    (!q || norm(`${s.title} ${s.artist} ${s.genre} ${s.notes} ${s.lyrics || ""} ${s.content || ""}`).includes(q)) &&
+    (!S.f.status || (S.f.status === "allready" ? readyForAll(s.id) : S.f.status === "none" ? !myStatus(s.id) : myStatus(s.id) === S.f.status))
   );
   if (S.sort === "title") list.sort(byTitle);
   else if (S.sort === "artist") list.sort((a, b) => (a.artist || "~").localeCompare(b.artist || "~", "it", { sensitivity: "base" }) || byTitle(a, b));
@@ -578,7 +744,7 @@ function libraryView(){
     ${banner()}
     <div class="lib-head"><h1>Brani della band</h1><span class="count" id="count"></span></div>
     <div class="search"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a8998a" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-      <input id="q" type="search" placeholder="Cerca titolo, artista, note…" value="${esc(S.f.q)}" aria-label="Cerca" autocomplete="off"></div>
+      <input id="q" type="search" placeholder="Cerca titolo, artista o una frase del testo…" value="${esc(S.f.q)}" aria-label="Cerca" autocomplete="off"></div>
     <div class="chips" id="chips" role="group" aria-label="Genere"></div>
     <div class="filters">
       <select id="f-artist" aria-label="Artista"></select>
@@ -586,6 +752,14 @@ function libraryView(){
         <option value="">Accordi e tab</option>
         <option value="chords" ${S.f.type==="chords"?"selected":""}>Solo accordi</option>
         <option value="tabs" ${S.f.type==="tabs"?"selected":""}>Solo tablature</option>
+      </select>
+      <select id="f-status" aria-label="Stato">
+        <option value="">Tutti gli stati</option>
+        <option value="allready" ${S.f.status==="allready"?"selected":""}>Pronti per tutta la band</option>
+        <option value="ready" ${S.f.status==="ready"?"selected":""}>Io: pronto</option>
+        <option value="almost" ${S.f.status==="almost"?"selected":""}>Io: quasi</option>
+        <option value="learn" ${S.f.status==="learn"?"selected":""}>Io: da imparare</option>
+        <option value="none" ${S.f.status==="none"?"selected":""}>Io: non segnati</option>
       </select>
       <select id="f-sort" aria-label="Ordina">
         <option value="title" ${S.sort==="title"?"selected":""}>Ordina per titolo</option>
@@ -609,7 +783,7 @@ function renderLibraryChrome(){
 function renderLibraryList(){
   const list = filteredSongs();
   const el = $("#list"); if (!el) return;
-  const active = S.f.q || S.f.genre || S.f.artist || S.f.type;
+  const active = S.f.q || S.f.genre || S.f.artist || S.f.type || S.f.status;
   $("#count").textContent = active ? `${list.length} di ${S.songs.length}` : `${S.songs.length} ${S.songs.length === 1 ? "brano" : "brani"}`;
   $("#fa").innerHTML = active ? `<button class="link-btn" data-a="clear-f">Azzera filtri</button>${list.length && !S.readOnly ? `<button class="link-btn" data-a="filter-to-pl">Crea playlist con questi ${list.length} brani</button>` : ""}` : "";
   if (!S.songs.length){
@@ -617,7 +791,7 @@ function renderLibraryList(){
     return;
   }
   if (!list.length){ el.innerHTML = `<div class="empty"><h3>Nessun brano trovato</h3>Prova a cambiare i filtri.</div>`; return; }
-  el.innerHTML = list.map(songRow).join("");
+  el.innerHTML = list.map(songRow).join("") + (S.trash.length ? `<button class="link-btn" style="margin:10px auto" data-a="trash">Cestino (${S.trash.length})</button>` : "");
 }
 function songBadges(s){
   const b = [];
@@ -626,6 +800,8 @@ function songBadges(s){
   const nImg = (S.images[s.id] || []).length;
   if (s.content && s.content.trim()) b.push(`<span class="badge">${s.type === "tabs" ? "TAB" : s.type === "both" ? "ACC+TAB" : "ACC"}</span>`);
   if (nImg) b.push(`<span class="badge">IMG ${nImg}</span>`);
+  const ms = myStatus(s.id);
+  if (ms) b.push(`<span class="badge st-${ms}">${STATUS[ms].toUpperCase()}</span>`);
   return b.join("");
 }
 function songRow(s){
@@ -644,6 +820,7 @@ function songView(){
   if (s.tuning && !/^standard$/i.test(s.tuning)) meta.push(`<span class="pill tun">Accordatura: ${esc(s.tuning)}</span>`);
   if (s.key) meta.push(`<span class="pill">Tonalità: ${esc(s.key)}</span>`);
   if (s.bpm) meta.push(`<span class="pill">${esc(s.bpm)} BPM</span>`);
+  if (s.duration) meta.push(`<span class="pill">${esc(s.duration)}</span>`);
   const imgs = S.images[s.id] || [];
   if (s.content && s.content.trim()) meta.push(`<span class="pill">${TYPE_LABEL[s.type] || "Accordi"}</span>`);
   if (imgs.length) meta.push(`<span class="pill">${imgs.length} ${imgs.length === 1 ? "immagine" : "immagini"}</span>`);
@@ -662,6 +839,7 @@ function songView(){
     <div style="display:flex;gap:8px;align-items:center;padding-top:12px">
       <button class="icon-btn" data-a="back" aria-label="Indietro"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>${S.play ? "Playlist" : "Brani"}</button>
       <span class="spacer"></span>
+      <button class="icon-btn" data-a="stage" title="Modalità palco: schermo intero">Palco</button>
       ${S.readOnly ? "" : `<button class="icon-btn" data-a="add-to-pl" data-id="${esc(s.id)}">+ Playlist</button>
       <button class="icon-btn" data-a="edit-song" data-id="${esc(s.id)}">Modifica</button>`}
     </div>
@@ -671,8 +849,14 @@ function songView(){
       <div class="by">${[s.artist, s.genre].filter(Boolean).map(esc).join(" · ")}</div>
       ${s.updatedBy ? `<div class="by" style="font-size:13px">Ultima modifica di ${esc(s.updatedBy)}</div>` : ""}
       <div class="meta">${meta.join("")}</div>
+      <div class="song-links">
+        ${s.audio && /^https?:\/\//i.test(s.audio) ? `<a class="btn" href="${esc(s.audio)}" target="_blank" rel="noopener">▶ Ascolta</a>` : ""}
+        <button class="btn" data-a="history" data-id="${esc(s.id)}">Cronologia</button>
+      </div>
     </div>
-    ${s.notes ? `<div class="notes"><span class="lbl">Le mie note</span>${esc(s.notes)}</div>` : ""}
+    ${statusBlock(s)}
+    ${s.notes ? `<div class="notes"><span class="lbl">Note della band</span>${esc(s.notes)}</div>` : ""}
+    ${myNoteBlock(s)}
     ${pb.list.length > 1 ? `<div class="parts" role="tablist" aria-label="Cosa mostrare">${pb.list.map(k => `<button role="tab" aria-selected="${pb.part === k}" data-a="part" data-v="${k}">${PART_LABEL[k]}</button>`).join("")}</div>` : ""}
     ${pb.part !== "lyrics" && hasChords ? `<div class="chord-bar"><button class="link-btn" data-a="all-chords">Mostra le posizioni di tutti gli accordi</button><span class="hint">oppure tocca un accordo nel testo</span></div>` : ""}
     <div id="part-body">${pb.html}</div>
@@ -683,8 +867,28 @@ function songView(){
     ${S.play ? `<div class="ctl"><button data-a="prev" ${S.play.index <= 0 ? "disabled" : ""} aria-label="Brano precedente">‹</button><span class="val">${S.play.index + 1}/${plLen}</span><button data-a="next" ${S.play.index >= plLen - 1 ? "disabled" : ""} aria-label="Brano successivo">›</button></div>` : ""}
     <div class="ctl" title="Dimensione testo"><button data-a="font-dec" aria-label="Testo più piccolo">A−</button><span class="val">${S.font}px</span><button data-a="font-inc" aria-label="Testo più grande">A+</button></div>
     ${hasChords ? `<div class="ctl" title="Trasponi accordi"><button data-a="tr-dec" aria-label="Abbassa di un semitono">♭</button><button class="val" data-a="tr-reset" style="min-width:52px" aria-label="Azzera trasposizione">${S.transpose > 0 ? "+" : ""}${S.transpose} st</button><button data-a="tr-inc" aria-label="Alza di un semitono">♯</button></div>` : ""}
+    <div class="ctl" title="Metronomo"><button data-a="metro" class="${S.metro ? "on" : ""}" aria-label="Metronomo" style="min-width:44px" id="metro-btn">♩</button><button data-a="metro-dec" aria-label="Più lento">−</button><span class="val" id="metro-val">${metroBpm(s)}</span><button data-a="metro-inc" aria-label="Più veloce">+</button></div>
+    ${S.stage ? `<div class="ctl"><button data-a="stage" aria-label="Esci dalla modalità palco" style="min-width:60px">Esci</button></div>` : ""}
     <div class="ctl" title="Scorrimento automatico"><button data-a="scroll" class="${S.scrolling ? "on" : ""}" aria-label="${S.scrolling ? "Ferma scorrimento" : "Avvia scorrimento"}" style="min-width:44px">${S.scrolling ? "❚❚" : "▶"}</button><button data-a="speed-dec" aria-label="Più lento">−</button><span class="val">vel ${S.speed}</span><button data-a="speed-inc" aria-label="Più veloce">+</button></div>
   </div></div>`;
+}
+
+function statusBlock(s){
+  const mine = myStatus(s.id);
+  const others = Object.entries(S.status[s.id] || {}).filter(([k]) => k !== FB.uid).map(([, v]) => v).filter(v => v && v.s);
+  return `<div class="status-row">
+    <span class="lbl">Come la so</span>
+    <div class="seg-mini" role="group" aria-label="Il mio stato per questo brano">${Object.entries(STATUS).map(([k, l]) => `<button data-a="set-status" data-v="${k}" aria-pressed="${mine === k}" class="st-${k}">${l}</button>`).join("")}</div>
+    ${others.length ? `<div class="others">${others.map(v => `<span class="badge st-${v.s}">${esc(v.n || v.e)}: ${STATUS[v.s]}</span>`).join("")}</div>` : ""}
+  </div>`;
+}
+function myNoteBlock(s){
+  const t = S.myNotes[s.id] || "";
+  if (S.editingNote === s.id) return `<div class="notes mine"><span class="lbl">Le mie note private · le vedi solo tu</span>
+    <textarea id="my-note-ta" rows="3" aria-label="Le mie note private">${esc(t)}</textarea>
+    <div class="row-actions" style="margin-top:8px"><button class="btn primary" data-a="note-save">Salva</button><button class="btn" data-a="note-cancel">Annulla</button></div></div>`;
+  if (t) return `<div class="notes mine"><span class="lbl">Le mie note private · le vedi solo tu</span>${esc(t)}<button class="link-btn" style="display:block;margin-top:6px" data-a="note-edit">Modifica nota</button></div>`;
+  return `<button class="link-btn" style="margin-top:10px" data-a="note-edit">+ Aggiungi una nota privata (la vedi solo tu)</button>`;
 }
 
 /* editor */
@@ -710,7 +914,9 @@ function editView(){
       </div></div>
       <div class="field w2 half"><label for="e-key">Tonalità</label><input id="e-key" name="key" value="${esc(v.key)}" placeholder="Es. G"></div>
       <div class="field w2 half"><label for="e-bpm">BPM</label><input id="e-bpm" name="bpm" inputmode="numeric" value="${esc(v.bpm)}" placeholder="Es. 92"></div>
-      <div class="field full"><label for="e-notes">Le mie note</label><textarea id="e-notes" name="notes" rows="3" placeholder="Es. Intro solo con la chitarra acustica, il ritornello si ripete 2 volte, rallentare sul finale">${esc(v.notes)}</textarea></div>
+      <div class="field w2 half"><label for="e-duration">Durata</label><input id="e-duration" name="duration" value="${esc(v.duration || "")}" placeholder="Es. 3:45" inputmode="numeric"></div>
+      <div class="field full"><label for="e-audio">Link per ascoltarlo</label><input id="e-audio" name="audio" value="${esc(v.audio || "")}" placeholder="Link YouTube o Spotify"></div>
+      <div class="field full"><label for="e-notes">Note della band (le vedono tutti)</label><textarea id="e-notes" name="notes" rows="3" placeholder="Es. Intro solo con la chitarra acustica, il ritornello si ripete 2 volte, rallentare sul finale">${esc(v.notes)}</textarea></div>
       <h3 class="form-sec">Testo <span>per chi canta</span></h3>
       <div class="field full">
         <textarea id="e-lyrics" name="lyrics" class="lyr" rows="8" aria-label="Testo del brano" placeholder="Incolla qui solo le parole del brano.&#10;&#10;[Strofa 1]&#10;Prima riga del testo…&#10;&#10;[Ritornello]&#10;…">${esc(v.lyrics || "")}</textarea>
@@ -770,6 +976,8 @@ function setupEditor(){
       content: cleanContent(fd.get("content")).replace(/\s+$/, ""),
       lyrics: cleanContent(fd.get("lyrics")).replace(/\s+$/, ""),
       source: String(fd.get("source") || "").trim(),
+      duration: normDuration(String(fd.get("duration") || "")),
+      audio: String(fd.get("audio") || "").trim(),
       createdAt: old ? old.createdAt || now : now,
       updatedAt: now,
       createdBy: old ? old.createdBy || "" : FB.name,
@@ -779,6 +987,7 @@ function setupEditor(){
     if (S.imgBusy){ toast("Attendi: sto preparando le immagini"); return; }
     if (new Blob([JSON.stringify(song)]).size > 250000){ toast("Il testo è troppo lungo: prova a togliere le parti ripetute"); return; }
     $("#save-btn").disabled = true;
+    if (old) saveHistory(old);
     const ok = await write("songs", song);
     if (ok) saveEditImages(song.id);
     if (ok){
@@ -788,6 +997,14 @@ function setupEditor(){
     } else { const b = $("#save-btn"); if (b) b.disabled = false; }
   });
 }
+
+function normDuration(t){
+  t = t.trim().replace(/[.,]/g, ":"); if (!t) return "";
+  const m = t.match(/^(\d{1,2})(?::(\d{1,2}))?$/); if (!m) return t;
+  return m[2] === undefined ? `${+m[1]}:00` : `${+m[1]}:${m[2].length === 1 ? m[2] + "0" : m[2]}`;
+}
+function durSec(d){ const m = String(d || "").match(/^(\d+):(\d{2})$/); return m ? +m[1] * 60 + +m[2] : 0; }
+function fmtTotal(sec){ const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60); return h ? `${h} h ${m} min` : `${m} min`; }
 
 /* ---------- immagini ---------- */
 async function compressImage(file){
@@ -903,7 +1120,7 @@ function playlistView(){
       <span class="spacer"></span>
       ${ro ? "" : `<button class="icon-btn" data-a="pl-rename">Rinomina</button><button class="icon-btn" data-a="pl-delete" style="color:var(--danger)">Elimina</button>`}
     </div>
-    <div class="lib-head"><h1>${esc(p.name)}</h1><span class="count">${items.length} ${items.length === 1 ? "brano" : "brani"}</span></div>
+    <div class="lib-head"><h1>${esc(p.name)}</h1><span class="count">${items.length} ${items.length === 1 ? "brano" : "brani"}${(() => { const t = items.reduce((a, x) => a + durSec(x.s.duration), 0); const miss = items.filter(x => !durSec(x.s.duration)).length; return t ? ` · ${fmtTotal(t)}${miss ? ` (+${miss} senza durata)` : ""}` : ""; })()}</span></div>
     <div class="pl-actions">
       <button class="btn primary" data-a="pl-play" ${items.length ? "" : "disabled"}>▶ Inizia dal primo</button>
       ${ro ? "" : `<button class="btn" data-a="pl-add">+ Aggiungi brani</button>`}
@@ -911,10 +1128,32 @@ function playlistView(){
     <div class="list">
       ${items.length ? items.map((x, n) => `<div class="pl-item">
         <span class="pl-num">${n + 1}</span>
-        <button class="grow" data-a="pl-open-song" data-idx="${n}"><span class="t">${esc(x.s.title)}</span><br><span class="s">${[x.s.artist, +x.s.capo ? "Capo " + x.s.capo : "", x.s.tuning && !/^standard$/i.test(x.s.tuning) ? x.s.tuning : ""].filter(Boolean).map(esc).join(" · ")}</span></button>
+        <button class="grow" data-a="pl-open-song" data-idx="${n}"><span class="t">${esc(x.s.title)}</span>${readyForAll(x.s.id) ? ' <span class="badge st-ready">PRONTO</span>' : ""}<br><span class="s">${[x.s.artist, x.s.duration, +x.s.capo ? "Capo " + x.s.capo : "", x.s.tuning && !/^standard$/i.test(x.s.tuning) ? x.s.tuning : ""].filter(Boolean).map(esc).join(" · ")}</span></button>
         ${ro ? "" : `<span class="mini"><button data-a="pl-up" data-idx="${x.i}" aria-label="Sposta su" ${n === 0 ? "disabled" : ""}>↑</button><button data-a="pl-down" data-idx="${x.i}" aria-label="Sposta giù" ${n === items.length - 1 ? "disabled" : ""}>↓</button><button data-a="pl-remove" data-idx="${x.i}" aria-label="Togli dalla playlist">✕</button></span>`}
       </div>`).join("") : `<div class="empty"><h3>Playlist vuota</h3>Aggiungi i brani che vuoi suonare.</div>`}
     </div>
+    ${logBlock(p)}
+  </main>`;
+}
+function logBlock(p){
+  const log = [...(p.log || [])].sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.at || 0) - (a.at || 0));
+  const today = new Date().toISOString().slice(0, 10);
+  const fmt = d => { try { return new Date(d + "T12:00").toLocaleDateString("it-IT", { weekday: "short", day: "numeric", month: "long", year: "numeric" }); } catch { return d; } };
+  return `<section class="log">
+    <h2>Diario delle prove</h2>
+    ${S.readOnly ? "" : `<div class="log-form"><input type="date" id="log-date" value="${today}" aria-label="Data della prova"><textarea id="log-text" rows="2" placeholder="Com'è andata? Cosa sistemare la prossima volta…" aria-label="Note sulla prova"></textarea><button class="btn primary" data-a="log-add">Aggiungi</button></div>`}
+    ${log.length ? log.map(e => `<div class="log-item"><div class="log-head"><b>${esc(fmt(e.date))}</b>${e.by ? ` · ${esc(e.by)}` : ""}<span class="spacer"></span>${S.readOnly ? "" : `<button class="icon-btn ghost" data-a="log-del" data-id="${esc(e.id)}" aria-label="Elimina nota">✕</button>`}</div><div class="log-text">${esc(e.text)}</div></div>`).join("") : `<p class="hint">Nessuna nota ancora. Dopo ogni prova scrivi cosa è andato bene e cosa sistemare.</p>`}
+  </section>`;
+}
+function trashView(){
+  const list = [...S.trash].sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
+  const left = s => Math.max(0, 30 - Math.floor((Date.now() - (s.deletedAt || 0)) / DAY));
+  return `<main class="wrap">
+    <div style="display:flex;gap:8px;align-items:center;padding-top:12px"><button class="icon-btn" data-a="nav-library"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>Brani</button></div>
+    <div class="lib-head"><h1>Cestino</h1><span class="count">${list.length} ${list.length === 1 ? "brano" : "brani"}</span></div>
+    <p class="hint" style="margin:0 0 10px">I brani restano qui 30 giorni, poi vengono eliminati per sempre.</p>
+    <div class="list">${list.length ? list.map(s => `<div class="pl-item"><div class="grow" style="text-align:left"><span class="t">${esc(s.title)}</span><br><span class="s">${[s.artist, s.deletedBy ? "eliminato da " + s.deletedBy : "", `ancora ${left(s)} giorni`].filter(Boolean).map(esc).join(" · ")}</span></div>
+      ${S.readOnly ? "" : `<button class="btn" data-a="trash-restore" data-id="${esc(s.id)}">Ripristina</button><button class="btn danger" data-a="trash-purge" data-id="${esc(s.id)}">Elimina</button>`}</div>`).join("") : `<div class="empty"><h3>Il cestino è vuoto</h3></div>`}</div>
   </main>`;
 }
 
@@ -974,9 +1213,91 @@ async function setScroll(on){
   if (b){ b.classList.toggle("on", on); b.textContent = on ? "❚❚" : "▶"; b.setAttribute("aria-label", on ? "Ferma scorrimento" : "Avvia scorrimento"); }
 }
 
+/* ---------- modalità palco ---------- */
+let stageWake = null;
+async function setStage(on, silent){
+  S.stage = on;
+  document.body.classList.toggle("stage", on);
+  try {
+    if (on){ await document.documentElement.requestFullscreen?.(); stageWake = await navigator.wakeLock?.request("screen"); }
+    else { if (document.fullscreenElement) await document.exitFullscreen?.(); await stageWake?.release(); stageWake = null; }
+  } catch {}
+  if (!silent) render();
+}
+document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && S.stage) setStage(false); });
+document.addEventListener("visibilitychange", async () => { if (document.visibilityState === "visible" && S.stage && !stageWake){ try { stageWake = await navigator.wakeLock?.request("screen"); } catch {} } });
+let touchX = 0, touchY = 0;
+document.addEventListener("touchstart", e => { if (e.touches.length === 1){ touchX = e.touches[0].clientX; touchY = e.touches[0].clientY; } }, { passive: true });
+document.addEventListener("touchend", e => {
+  if (!S.stage || !S.play || S.view !== "song") return;
+  const t = e.changedTouches[0]; const dx = t.clientX - touchX, dy = t.clientY - touchY;
+  if (Math.abs(dx) > 90 && Math.abs(dy) < 60) (dx < 0 ? A.next : A.prev)();
+}, { passive: true });
+
+/* ---------- metronomo ---------- */
+let audioCtx = null, metroTimer = 0, metroBeat = 0;
+function metroBpm(s){ return S.metroBpm || +String(s && s.bpm || "").replace(/[^\d]/g, "") || 100; }
+function click(accent){
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.frequency.value = accent ? 1600 : 1000;
+  g.gain.setValueAtTime(accent ? 0.9 : 0.55, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+  o.connect(g).connect(audioCtx.destination); o.start(t); o.stop(t + 0.07);
+  const b = $("#metro-btn"); if (b){ b.classList.add("flash"); setTimeout(() => b.classList.remove("flash"), 90); }
+}
+function startMetro(){
+  try { audioCtx ||= new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume?.(); } catch { toast("Il metronomo non è supportato su questo dispositivo"); return; }
+  stopMetro(true);
+  const bpm = metroBpm(songById(S.songId));
+  metroBeat = 0; S.metro = true;
+  const beat = () => { click(metroBeat % 4 === 0); metroBeat++; };
+  beat(); metroTimer = setInterval(beat, 60000 / bpm);
+  $("#metro-btn")?.classList.add("on");
+}
+function stopMetro(keep){ clearInterval(metroTimer); metroTimer = 0; if (!keep){ S.metro = null; $("#metro-btn")?.classList.remove("on"); } }
+function changeMetro(d){
+  S.metroBpm = Math.max(30, Math.min(260, metroBpm(songById(S.songId)) + d));
+  const v = $("#metro-val"); if (v) v.textContent = S.metroBpm;
+  if (S.metro) startMetro();
+}
+
+/* ---------- ukulele e basso ---------- */
+const INTERVALS = { "": [0,4,7], m: [0,3,7], "7": [0,4,7,10], m7: [0,3,7,10], maj7: [0,4,7,11], sus2: [0,2,7], sus4: [0,5,7], "7sus4": [0,5,7,10], "6": [0,4,7,9], m6: [0,3,7,9], "9": [0,4,10,2,7], add9: [0,4,7,2], dim: [0,3,6], dim7: [0,3,6,9], m7b5: [0,3,6,10], aug: [0,4,8], "5": [0,7] };
+const UKE_OPEN = [7, 0, 4, 9]; // G C E A
+function ukeShapes(name){
+  const c = parseChord(name); if (!c) return [];
+  const root = noteIdx(c.root); const iv = INTERVALS[c.q] || [0,4,7];
+  const tones = iv.map(i => (root + i) % 12);
+  const req = (iv.length > 4 ? iv.filter(i => i !== 7) : iv).map(i => (root + i) % 12);
+  const found = [];
+  for (let b = 0; b <= 9; b++){
+    const cand = UKE_OPEN.map(o => { const fs = []; if (tones.includes(o % 12)) fs.push(0); for (let f = Math.max(1, b); f <= b + 3; f++) if (tones.includes((o + f) % 12)) fs.push(f); return fs; });
+    if (cand.some(x => !x.length)) continue;
+    let best = null;
+    for (const a of cand[0]) for (const b2 of cand[1]) for (const c2 of cand[2]) for (const d of cand[3]){
+      const fr = [a, b2, c2, d]; const notes = new Set(fr.map((f, i) => (UKE_OPEN[i] + f) % 12));
+      if (!req.every(t => notes.has(t))) continue;
+      const pos = fr.filter(f => f > 0); const span = pos.length ? Math.max(...pos) - Math.min(...pos) : 0;
+      if (span > 3) continue;
+      const score = Math.max(0, ...fr) * 2 + span - fr.filter(f => f === 0).length * 0.5 + pos.length * 0.2;
+      if (!best || score < best.score) best = { fr, score };
+    }
+    if (best && !found.some(x => x.fr.join() === best.fr.join())) found.push(best);
+  }
+  return found.sort((a, b) => a.score - b.score).slice(0, 4).map(x => ({ frets: x.fr, label: Math.max(...x.fr) <= 4 ? "Prima posizione" : "Più in alto sul manico" }));
+}
+function bassShapes(name){
+  const c = parseChord(name); if (!c) return [];
+  const n = noteIdx(c.bass || c.root);
+  return [[4, 0], [9, 1], [2, 2]].map(([open, i]) => { const f = ((n - open) % 12 + 12) % 12; const fr = [-1, -1, -1, -1]; fr[i] = f; return { frets: fr, label: `${c.bass || c.root} sulla corda ${["Mi", "La", "Re"][i]}` }; });
+}
+
 /* ---------- navigation ---------- */
 function go(view, extra = {}){
   if (S.scrolling) setScroll(false);
+  if (S.metro && !(view === "song" && S.stage)) stopMetro();
+  if (view !== "song" && S.stage) setStage(false, true);
+  S.editingNote = null;
   Object.assign(S, extra); S.prevView = S.view; S.view = view;
   render(); window.scrollTo(0, 0);
 }
@@ -1007,16 +1328,13 @@ const A = {
   "cancel-edit": () => S.editId ? go("song", { songId: S.editId, editId: null }) : go("library", { editId: null }),
   "delete-song": id => {
     const s = songById(id); if (!s) return;
-    confirmBox("Eliminare il brano?", `"${s.title}" verrà tolto dal repertorio e da tutte le playlist.`, "Elimina", async () => {
-      const ok = await remove("songs", id);
-      if (!ok) return;
-      deleteSongImages(id);
-      for (const p of S.playlists.filter(p => (p.songIds || []).includes(id))) await updatePl(p, { songIds: p.songIds.filter(x => x !== id) });
-      toast("Brano eliminato"); go("library", { editId: null, songId: null });
+    confirmBox("Spostare il brano nel cestino?", `"${s.title}" finisce nel cestino: chiunque nella band può ripristinarlo entro 30 giorni.`, "Sposta nel cestino", () => {
+      trashSong(s);
+      toast("Brano spostato nel cestino"); go("library", { editId: null, songId: null });
     });
   },
   "genre": (_, el) => { S.f.genre = el.dataset.v; S.f.artist = ""; renderLibraryChrome(); renderLibraryList(); },
-  "clear-f": () => { S.f = { q: "", genre: "", artist: "", type: "" }; render(); },
+  "clear-f": () => { S.f = { q: "", genre: "", artist: "", type: "", status: "" }; render(); },
   "filter-to-pl": () => {
     const list = filteredSongs();
     const name = [S.f.genre, S.f.artist].filter(Boolean).join(" · ") || "Selezione";
@@ -1088,6 +1406,25 @@ const A = {
     ta.value = txt; toast("Testo ricavato dagli accordi");
   },
   "chord": (_, el) => showChord(el.dataset.c),
+  "stage": () => setStage(!S.stage),
+  "metro": () => S.metro ? stopMetro() : startMetro(),
+  "metro-dec": () => changeMetro(-2),
+  "metro-inc": () => changeMetro(2),
+  "history": id => showHistory(id),
+  "set-status": (_, el) => setStatus(S.songId, el.dataset.v),
+  "note-edit": () => { S.editingNote = S.songId; render(); },
+  "note-cancel": () => { S.editingNote = null; render(); },
+  "note-save": () => { const t = $("#my-note-ta")?.value || ""; saveMyNote(S.songId, t); S.editingNote = null; toast(t.trim() ? "Nota salvata" : "Nota eliminata"); render(); },
+  "trash": () => go("trash"),
+  "trash-restore": id => { const s = S.trash.find(x => x.id === id); if (s){ restoreSong(s); toast("Brano ripristinato"); render(); } },
+  "trash-purge": id => { const s = S.trash.find(x => x.id === id); if (s) confirmBox("Eliminare per sempre?", `"${s.title}" verrà cancellato definitivamente, con immagini e cronologia. Non si può annullare.`, "Elimina per sempre", () => { purgeSong(s); toast("Brano eliminato"); render(); }); },
+  "log-add": () => {
+    const p = plById(S.playlistId); if (!p) return;
+    const text = ($("#log-text")?.value || "").trim(); const date = $("#log-date")?.value || new Date().toISOString().slice(0, 10);
+    if (!text){ $("#log-text")?.focus(); return; }
+    updatePl(p, { log: [...(p.log || []), { id: uid("l"), date, text, by: FB.name, at: Date.now() }] }); toast("Nota della prova aggiunta");
+  },
+  "log-del": id => { const p = plById(S.playlistId); if (p) confirmBox("Eliminare la nota?", "La nota della prova verrà eliminata.", "Elimina", () => updatePl(p, { log: (p.log || []).filter(e => e.id !== id) })); },
   "all-chords": () => showAllChords(),
   "part": (_, el) => { S.part = el.dataset.v; savePrefs(); render(); },
   "img-del": (_, el) => { const i = +el.dataset.idx; const [im] = S.editImages.splice(i, 1); if (im && !im.isNew) S.removedImages.push(im.id); drawEditImages(); },
@@ -1117,8 +1454,13 @@ function updateSongDisplay(){
 function setupMembers(el){
   const box = $("#m-members", el), input = $("#m-email", el);
   const draw = () => {
-    box.innerHTML = S.members.map(m => `<div class="check" style="cursor:default"><span style="flex:1;word-break:break-all">${esc(m)}${m === OWNER_EMAIL ? ' <span class="s">(tu)</span>' : ""}</span>${m === OWNER_EMAIL ? "" : `<button class="icon-btn ghost" data-rm="${esc(m)}" aria-label="Togli ${esc(m)}">✕</button>`}</div>`).join("");
+    box.innerHTML = S.members.map(m => `<div class="check" style="cursor:default;flex-wrap:wrap"><span style="flex:1;min-width:160px;word-break:break-all">${esc(m)}${m === OWNER_EMAIL ? ' <span class="s">(tu)</span>' : ""}</span>${m === OWNER_EMAIL ? "" : `<select data-role="${esc(m)}" aria-label="Permessi di ${esc(m)}"><option value="edit">Può modificare</option><option value="view" ${S.viewers.includes(m) ? "selected" : ""}>Solo lettura</option></select><button class="icon-btn ghost" data-rm="${esc(m)}" aria-label="Togli ${esc(m)}">✕</button>`}</div>`).join("");
     box.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => saveMembers(S.members.filter(x => x !== b.dataset.rm)).then(draw));
+    box.querySelectorAll("[data-role]").forEach(sel => sel.onchange = () => {
+      const m = sel.dataset.role;
+      S.viewers = sel.value === "view" ? [...new Set([...S.viewers, m])] : S.viewers.filter(x => x !== m);
+      saveMembers(S.members); toast(sel.value === "view" ? "Ora può solo leggere" : "Ora può modificare");
+    });
   };
   const add = async () => {
     const e = input.value.trim().toLowerCase();
@@ -1134,18 +1476,20 @@ function setupMembers(el){
 async function saveMembers(list){
   const members = [...new Set([OWNER_EMAIL, ...list.map(x => x.toLowerCase())])];
   S.members = members;
-  FB.fs.setDoc(bandRef(), { name: S.bandName || "La band", members }).catch(handleWriteError);
+  S.viewers = S.viewers.filter(v => members.includes(v));
+  FB.fs.setDoc(bandRef(), { name: S.bandName || "La band", members, viewers: S.viewers }).catch(handleWriteError);
 }
 function backupDialog(){
   const allImages = Object.values(S.images).flat();
   const data = JSON.stringify({ app: "repertorio", version: 2, exportedAt: new Date().toISOString(), songs: S.songs, playlists: S.playlists, images: allImages }, null, 1);
   const membersHtml = isOwner() ? `<hr style="border:0;border-top:1px solid var(--line);width:100%;margin:4px 0">
       <h3 style="font-size:17px">Membri della band</h3>
-      <p style="margin:0;color:var(--muted);font-size:14px">Chi è in questo elenco può vedere, aggiungere e modificare tutti i brani e le playlist. Usa l'email del loro account Google.</p>
+      <p style="margin:0;color:var(--muted);font-size:14px">Usa l'email del loro account Google. "Può modificare" aggiunge e cambia brani e playlist; "Solo lettura" li vede soltanto (utile per ospiti o turnisti).</p>
       <div id="m-members" style="display:flex;flex-direction:column;gap:6px"></div>
       <div style="display:flex;gap:8px"><input type="text" id="m-email" placeholder="email@gmail.com" aria-label="Email del nuovo membro" inputmode="email" autocomplete="off"><button class="btn primary" id="m-add">Aggiungi</button></div>` : "";
   modal({ title: "Band, account e backup",
-    body: `<div class="acct"><span style="flex:1">Accesso come <b>${esc(FB.email)}</b></span><button class="btn" id="m-logout">Esci</button></div>${membersHtml}
+    body: `<div class="acct"><span style="flex:1">Accesso come <b>${esc(FB.email)}</b>${S.readOnly ? " · solo lettura" : ""}<br><span style="font-size:12px">Versione app ${APP_VERSION}</span></span><button class="btn" id="m-logout">Esci</button></div>
+      <button class="btn" data-a="trash" data-close>Cestino (${S.trash.length})</button>${membersHtml}
       <hr style="border:0;border-top:1px solid var(--line);width:100%;margin:4px 0">
       <p style="margin:0;color:var(--muted);font-size:14px">Scarica una copia di sicurezza con tutti i ${S.songs.length} brani e le ${S.playlists.length} playlist.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="m-dl">Scarica backup</button><button class="btn" id="m-copy">Copia negli appunti</button></div>
@@ -1162,6 +1506,7 @@ function backupDialog(){
         a.href = URL.createObjectURL(new Blob([data], { type: "application/json" }));
         a.download = "repertorio-backup-" + new Date().toISOString().slice(0, 10) + ".json";
         document.body.appendChild(a); a.click(); a.remove();
+        try { localStorage.setItem("repertorio-lastBackup", String(Date.now())); } catch {}
         setTimeout(() => URL.revokeObjectURL(a.href), 5000);
       };
       $("#m-copy", el).onclick = async () => { try { await navigator.clipboard.writeText(data); toast("Backup copiato"); } catch { toast("Copia non riuscita, usa Scarica backup"); } };
@@ -1204,6 +1549,45 @@ document.addEventListener("paste", e => {
 (() => {
   const st = document.createElement("style");
   st.textContent = `
+.upd-bar{position:fixed;left:12px;right:12px;top:calc(10px + env(safe-area-inset-top));z-index:80;max-width:560px;margin:0 auto;display:flex;align-items:center;gap:12px;background:var(--surface-2);border:1px solid var(--amber);border-radius:12px;padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.5);font-weight:600}
+.upd-bar span{flex:1}
+.song-links{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.song-links .btn{padding:7px 12px;font-size:14px;text-decoration:none;color:var(--text)}
+.status-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-top:12px}
+.status-row .lbl{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700}
+.status-row .others{display:flex;gap:6px;flex-wrap:wrap;width:100%}
+.seg-mini{display:inline-flex;gap:3px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:3px}
+.seg-mini button{border:0;background:none;border-radius:7px;padding:6px 10px;font-weight:700;font-size:13px;color:var(--muted)}
+.seg-mini button[aria-pressed="true"]{background:var(--surface-2);color:var(--text)}
+.seg-mini button.st-learn[aria-pressed="true"]{background:#5b2f28;color:#ffd2c8}
+.seg-mini button.st-almost[aria-pressed="true"]{background:#5a4320;color:#ffe1ad}
+.seg-mini button.st-ready[aria-pressed="true"]{background:#1f4c45;color:#c4f1e8}
+.instr{display:flex;width:100%}.instr button{flex:1}
+.badge.st-learn{border-color:#e8735f;color:#e8735f}
+.badge.st-almost{border-color:#f0a43c;color:#f0a43c}
+.badge.st-ready{border-color:#6cc3b5;color:#6cc3b5}
+.notes.mine{border-left-color:var(--teal)}
+.notes.mine .lbl{color:var(--teal)}
+.notes textarea{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;font-weight:500}
+.ctl button.flash{background:var(--teal)!important;color:var(--amber-ink)}
+.hist{border:1px solid var(--line);border-radius:10px;padding:10px}
+.hist-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:14px}
+.hist-head .btn{padding:6px 10px;font-size:13px}
+.hist-pre{margin:8px 0 0;font-family:var(--mono);font-size:11px;white-space:pre-wrap;max-height:240px;overflow:auto;background:var(--bg);border-radius:8px;padding:8px}
+.log{margin:6px 0 120px;display:flex;flex-direction:column;gap:10px}
+.log h2{font-size:20px;margin-top:10px}
+.log-form{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:start}
+.log-form input,.log-form textarea{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:9px 10px}
+@media (max-width:560px){.log-form{grid-template-columns:1fr}}
+.log-item{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.log-head{display:flex;align-items:center;gap:6px;font-size:14px;color:var(--muted)}
+.log-head b{color:var(--text)}
+.log-text{white-space:pre-wrap;margin-top:4px}
+body.stage .top, body.stage .song-head .by, body.stage .song-links, body.stage .status-row, body.stage .notes, body.stage .src, body.stage .chord-bar, body.stage main > div:first-child, body.stage .pl-ctx, body.stage main > .link-btn{display:none!important}
+body.stage .song-head{padding-top:10px}
+body.stage .song-head h1{font-size:20px}
+body.stage .meta .pill{display:none}
+body.stage .parts{margin-top:8px}
 .sheet .ch{cursor:pointer;border-radius:4px}
 .sheet .ch:hover{background:rgba(240,164,60,.15)}
 .chord-bar{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-top:12px}
@@ -1256,12 +1640,16 @@ document.addEventListener("input", e => {
 document.addEventListener("change", e => {
   if (e.target.id === "f-artist"){ S.f.artist = e.target.value; renderLibraryList(); }
   if (e.target.id === "f-type"){ S.f.type = e.target.value; renderLibraryList(); }
+  if (e.target.id === "f-status"){ S.f.status = e.target.value; renderLibraryList(); }
   if (e.target.id === "f-sort"){ S.sort = e.target.value; renderLibraryList(); }
 });
 document.addEventListener("keydown", e => {
   if (e.key === "Escape" && $("#modal-root").innerHTML){ closeModal(); return; }
   if (S.view !== "song" || /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || "") || $("#modal-root").innerHTML) return;
   if (e.key === " "){ e.preventDefault(); setScroll(!S.scrolling); }
+  else if (e.key === "PageDown" || (S.stage && e.key === "ArrowDown")){ e.preventDefault(); window.scrollBy({ top: window.innerHeight * 0.8, behavior: "smooth" }); }
+  else if (e.key === "PageUp" || (S.stage && e.key === "ArrowUp")){ e.preventDefault(); window.scrollBy({ top: -window.innerHeight * 0.8, behavior: "smooth" }); }
+  else if (e.key === "Escape" && S.stage){ setStage(false); }
   else if (e.key === "ArrowRight" && S.play){ A.next(); }
   else if (e.key === "ArrowLeft" && S.play){ A.prev(); }
   else if (e.key === "+" || e.key === "="){ A["font-inc"](); }
