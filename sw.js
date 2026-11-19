@@ -1,7 +1,6 @@
 // Service worker: tiene l'app sul dispositivo così si apre anche senza connessione.
-// I dati (brani e playlist) li gestisce Firestore con la sua cache offline.
-// Quando modifichi i file dell'app, cambia VERSION per forzare l'aggiornamento.
-const VERSION = "repertorio-v1";
+// Con la connessione scarica sempre i file più recenti; offline usa la copia salvata.
+const VERSION = "repertorio-v2";
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2/";
 const SHELL = [
   "./", "./index.html", "./app.js", "./firebase-config.js", "./manifest.webmanifest",
@@ -12,7 +11,7 @@ const SDK_FILES = ["firebase-app.js", "firebase-auth.js", "firebase-firestore.js
 self.addEventListener("install", event => {
   event.waitUntil((async () => {
     const cache = await caches.open(VERSION);
-    await cache.addAll(SHELL);
+    await cache.addAll(SHELL.map(u => new Request(u, { cache: "reload" })));
     await Promise.all(SDK_FILES.map(async url => {
       try { const res = await fetch(url, { mode: "cors" }); if (res.ok) await cache.put(url, res); } catch {}
     }));
@@ -39,15 +38,30 @@ self.addEventListener("fetch", event => {
   const req = event.request;
   if (req.method !== "GET") return;
   const url = new URL(req.url);
-  if (!cacheable(url)) return; // Firestore e login passano direttamente in rete
+  if (!cacheable(url)) return;
 
   event.respondWith((async () => {
     const cache = await caches.open(VERSION);
     const isPage = req.mode === "navigate";
-    const cached = await cache.match(isPage ? "./index.html" : req, { ignoreSearch: isPage });
-    // Mostra subito la copia salvata e intanto aggiorna in background
+    const key = isPage ? "./index.html" : req;
+    const cached = await cache.match(key, { ignoreSearch: isPage });
+    const sameOrigin = url.origin === self.location.origin;
+
+    if (sameOrigin){
+      try {
+        const res = await Promise.race([
+          fetch(isPage ? req : new Request(req, { cache: "no-cache" })),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), cached ? 4000 : 15000))
+        ]);
+        if (res && res.ok) cache.put(key, res.clone());
+        return res;
+      } catch {
+        return cached || new Response("Offline", { status: 503, statusText: "Offline" });
+      }
+    }
+
     const network = fetch(req).then(res => {
-      if (res && (res.ok || res.type === "opaque")) cache.put(isPage ? "./index.html" : req, res.clone());
+      if (res && (res.ok || res.type === "opaque")) cache.put(key, res.clone());
       return res;
     }).catch(() => null);
     if (cached){ event.waitUntil(network); return cached; }
